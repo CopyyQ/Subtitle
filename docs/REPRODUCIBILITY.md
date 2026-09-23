@@ -102,3 +102,23 @@ regressions.
 
 The production repository uses a single detector only. The runtime model path
 is `model/FAST` and generated media goes under `outputs/`.
+
+## Hardware benchmark workflow
+
+Use `scripts/benchmark_runtime.py` to measure real detector and end-to-end
+throughput. Each variant performs an untimed FAST warm-up, deletes its own
+detection cache, runs the requested frames, and records the exact command,
+runtime configuration, provenance, and metrics. OOM/failure rows are retained
+rather than silently reducing batch size.
+
+Server RTX 3070 sweep:
+
+```bash
+python scripts/benchmark_runtime.py "AI Engineer test.mp4" \
+  --device cuda --batches 4,8,16,32 --precisions fp32,fp16 \
+  --max-frames 600 --output-dir outputs/bench_rtx3070
+```
+
+For CPU validation on Quyt, use the same tool with `--device cpu`,
+`--precisions fp32`, and a CPU batch sweep. The exact selected measured
+commands are copied into this document after the corresponding hardware sweep.

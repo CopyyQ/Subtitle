@@ -82,3 +82,26 @@ See docs/REPRODUCIBILITY.md for the full provenance record.
 FAST is developed at https://github.com/czczup/FAST and is provisioned at a
 pinned upstream commit by scripts/setup_fast.sh. The upstream Apache-2.0
 license remains authoritative for FAST code.
+
+## Runtime benchmark
+
+RTX 3070 sweep (detection-only V1):
+
+```bash
+python scripts/benchmark_runtime.py "AI Engineer test.mp4" \
+  --device cuda --batches 4,8,16,32 --precisions fp32,fp16 \
+  --max-frames 600 --output-dir outputs/bench_rtx3070
+```
+
+The sweep writes `benchmark_results.json`, compares every candidate against
+the smallest-batch FP32 golden output, and emits `selected_command`. Only
+coordinate-regression-passing variants are eligible for selection.
+
+CPU baseline example:
+
+```powershell
+python scripts/run_subtitle_pipeline.py "AI Engineer test.mp4" `
+  --output outputs\FAST_V1_CPU_Quyt.mp4 `
+  --device cpu --precision fp32 --batch-size 1 `
+  --no-validate-chinese
+```

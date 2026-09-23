@@ -52,6 +52,7 @@ class PPOCRv5MobileBackend:
         adaptive_gating: bool = False,
         gate_max_skip_frames: int = 2,
         gate_change_threshold: float = .02,
+        gate_bright_net_threshold: float = .0075,
         predictor: Any | None = None,
     ):
         requested = device.type if isinstance(device, torch.device) else str(device)
@@ -70,6 +71,7 @@ class PPOCRv5MobileBackend:
         self.adaptive_gating = bool(adaptive_gating)
         self.gate_max_skip_frames = int(gate_max_skip_frames)
         self.gate_change_threshold = float(gate_change_threshold)
+        self.gate_bright_net_threshold = float(gate_bright_net_threshold)
         self.cpu_engine = None
         self.precision = "fp32"
         self._gate = (
@@ -77,6 +79,7 @@ class PPOCRv5MobileBackend:
                 TemporalGateConfig(
                     max_skip_frames=self.gate_max_skip_frames,
                     change_threshold=self.gate_change_threshold,
+                    bright_net_threshold=self.gate_bright_net_threshold,
                     band_top_fraction=.15,
                     band_bottom_fraction=.50,
                 )
@@ -105,6 +108,8 @@ class PPOCRv5MobileBackend:
             raise ValueError("gate_max_skip_frames must be non-negative")
         if not 0.0 <= self.gate_change_threshold <= 1.0:
             raise ValueError("gate_change_threshold must be within 0..1")
+        if not 0.0 <= self.gate_bright_net_threshold <= 1.0:
+            raise ValueError("gate_bright_net_threshold must be within 0..1")
 
         if predictor is None and self.device.type == "cpu":
             self.cpu_engine = resolve_cpu_engine(

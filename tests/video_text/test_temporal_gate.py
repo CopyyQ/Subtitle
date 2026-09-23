@@ -55,3 +55,21 @@ def test_gate_reset_forces_next_detection():
     assert gate.should_detect(x, 1) is False
     gate.reset()
     assert gate.should_detect(x, 2) is True
+
+
+
+def test_gate_detects_small_subtitle_toggle_via_bright_occupancy_delta():
+    gate = AdaptiveSubtitleGate(
+        TemporalGateConfig(
+            max_skip_frames=5,
+            change_threshold=.02,
+            bright_net_threshold=.0075,
+        )
+    )
+    base = frame(20)
+    changed = base.copy()
+    changed[45:49, 80:100] = 240
+
+    assert gate.should_detect(base, 0) is True
+    assert gate.should_detect(base, 1) is False
+    assert gate.should_detect(changed, 2) is True

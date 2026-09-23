@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from .association import AssociationConfig, build_provisional_tracks
+from .benchmark import collect_environment_metadata, latency_summary, real_time_factor
 from .chinese_validator import (
     EasyOCRChineseRecognizer,
     representative_frames,
@@ -219,6 +220,7 @@ class SubtitlePipeline:
 
     def _detect(self,source,info,target,cache_path):
         signature=self._signature(source,target)
+        self._detector_latency_samples_ms=[]
         cached=self._load_cache(cache_path,signature)
         if cached is not None:
             return cached,0.0,True
@@ -248,7 +250,13 @@ class SubtitlePipeline:
             t=time.perf_counter()
             detected=self.backend.detect_batch(rois)
             synchronize(backend_device)
-            detector_seconds+=time.perf_counter()-t
+            batch_elapsed=time.perf_counter()-t
+            detector_seconds+=batch_elapsed
+            if originals:
+                per_frame_ms=1000.0*batch_elapsed/len(originals)
+                self._detector_latency_samples_ms.extend(
+                    [per_frame_ms]*len(originals)
+                )
             if len(detected)!=len(originals):
                 cap.release()
                 raise RuntimeError("detector batch length mismatch")
@@ -378,7 +386,7 @@ class SubtitlePipeline:
                     frame,
                     by_frame.get(fi,[]),
                     color=(0,255,0),
-                    thickness=2,
+                    thickness=self.config.box_thickness,
                     line_type=cv2.LINE_AA,
                 )
             else:
@@ -386,7 +394,7 @@ class SubtitlePipeline:
                     frame,
                     by_frame.get(fi,[]),
                     color=(0,255,0),
-                    thickness=2,
+                    thickness=self.config.box_thickness,
                     line_type=cv2.LINE_AA,
                 )
             writer.write(frame)
@@ -736,7 +744,10 @@ class SubtitlePipeline:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(run_device)
 
+        detection_loop_start=time.perf_counter()
         frames,detector_seconds,cache_hit=self._detect(source,info,target,cache_path)
+        detection_loop_seconds=time.perf_counter()-detection_loop_start
+        temporal_start=time.perf_counter()
 
         split_input_count=sum(len(f.high)+len(f.low) for f in frames)
         v5_metrics={}
@@ -945,7 +956,11 @@ class SubtitlePipeline:
             display_shapes=build_line_shape_records(records,info.fps)
         else:
             display_shapes=build_display_shape_records(records,info.fps)
+        temporal_postprocess_seconds=time.perf_counter()-temporal_start
+        render_start=time.perf_counter()
         self._render(source,output,records,info,target)
+        render_encode_seconds=time.perf_counter()-render_start
+        production_elapsed_seconds=time.perf_counter()-start
 
         review_dir=output.with_name(output.stem+"_review")
         review_dir.mkdir(parents=True,exist_ok=True)
@@ -956,12 +971,44 @@ class SubtitlePipeline:
         gaps=[e for e in events if e.event_type=="internal_miss_recovered"]
         used_low=sum(1 for t in provisional for o in t.observations.values() if o.level=="LOW")
         total_low=sum(len(f.low) for f in frames)
+        actual_device=torch.device(
+            getattr(self.backend,"device",run_device)
+        )
+        actual_precision=str(
+            getattr(
+                self.backend,
+                "precision",
+                resolve_precision(self.config.precision,actual_device),
+            )
+        )
+        actual_batch_size=int(
+            getattr(self.backend,"batch_size",self.config.batch_size)
+        )
+        actual_cpu_threads=(
+            int(torch.get_num_threads()) if actual_device.type=="cpu" else 0
+        )
+        latency=latency_summary(
+            getattr(self,"_detector_latency_samples_ms",[])
+        )
+        source_duration_seconds=target/max(info.fps,1e-9)
         metrics={
             "frames":target,"source_fps":info.fps,"width":info.width,"height":info.height,
+            "source_codec":info.fourcc,
+            "source_duration_seconds":source_duration_seconds,
             "roi_bottom_fraction":self.config.roi_bottom_fraction,
             "temporal_mode":self.config.temporal_mode,
+            "device":actual_device.type,
+            "precision":actual_precision,
+            "batch_size":actual_batch_size,
+            "cpu_threads":actual_cpu_threads,
+            "detection_loop_seconds":detection_loop_seconds,
             "detector_seconds":detector_seconds,
             "detector_fps":None if detector_seconds<=0 else target/detector_seconds,
+            "detector_latency_mean_ms":latency["mean_ms"],
+            "detector_latency_p50_ms":latency["p50_ms"],
+            "detector_latency_p95_ms":latency["p95_ms"],
+            "temporal_postprocess_seconds":temporal_postprocess_seconds,
+            "render_encode_seconds":render_encode_seconds,
             "cache_hit":cache_hit,
             "peak_vram_mb":(
                 float(torch.cuda.max_memory_allocated(run_device)/1024**2)
@@ -994,8 +1041,16 @@ class SubtitlePipeline:
             **language_counts,
             **v5_metrics,
         }
-        metrics["elapsed_seconds"]=time.perf_counter()-start
-        metrics["end_to_end_fps"]=target/max(metrics["elapsed_seconds"],1e-9)
+        metrics["elapsed_seconds"]=production_elapsed_seconds
+        metrics["end_to_end_fps"]=target/max(production_elapsed_seconds,1e-9)
+        metrics["real_time_factor"]=real_time_factor(
+            production_elapsed_seconds,source_duration_seconds
+        )
+        metrics["output_frame_count"]=target
+        metrics["dropped_frame_count"]=0
+        root=Path(__file__).resolve().parents[2]
+        _,checkpoint=_default_fast_paths(root)
+        metrics["environment"]=collect_environment_metadata(root,checkpoint)
 
         coordinate_path=Path(coordinate_json).resolve() if coordinate_json else output.with_suffix(".json")
         metadata={"input":str(source),"output":str(output),**metrics}
@@ -1005,5 +1060,7 @@ class SubtitlePipeline:
             records,
             events,
             display_shapes=display_shapes,
+            frame_count=target,
+            fps=info.fps,
         )
         return PipelineResult(output,coordinate_path,review_dir,cache_path,metrics)

@@ -66,6 +66,15 @@ def test_pipeline_recovers_internal_gap_but_not_true_end_and_reuses_cache():
     out2=WORK/"out2.mp4"
     p.run(src,out2,max_frames=13)
     assert backend.calls==first_calls
+    for key in (
+        "detection_loop_seconds","temporal_postprocess_seconds",
+        "render_encode_seconds","source_duration_seconds",
+        "real_time_factor","detector_latency_mean_ms",
+        "detector_latency_p50_ms","detector_latency_p95_ms",
+        "output_frame_count","dropped_frame_count",
+        "device","precision","batch_size","cpu_threads",
+    ):
+        assert key in r1.metrics
 
 
 def test_pipeline_recovers_leading_glyph_extent_before_tracking():

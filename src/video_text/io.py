@@ -75,13 +75,43 @@ def mux_audio(video_only_path,source_path,output_path):
               "-map","0:v:0","-map","1:a?","-c:v","copy","-c:a","aac",str(output_path)])
     return Path(output_path)
 
-def write_coordinate_json(path,metadata,records,events,display_shapes=None):
+def write_coordinate_json(
+    path,metadata,records,events,display_shapes=None,*,frame_count=None,fps=None
+):
     p=Path(path); p.parent.mkdir(parents=True,exist_ok=True)
     event_rows=[e.__dict__ if hasattr(e,"__dict__") else {
         "event_type":e.event_type,"track_id":e.track_id,
         "start_frame":e.start_frame,"end_frame":e.end_frame
     } for e in events]
     payload={"metadata":metadata,"records":records,"events":event_rows}
+    if frame_count is not None:
+        count=int(frame_count)
+        frame_fps=float(fps if fps is not None else metadata.get("fps",0.0))
+        by_frame={i:[] for i in range(count)}
+        for row in records:
+            fi=int(row["frame"])
+            if fi not in by_frame:
+                continue
+            box={
+                "track_id":int(row.get("track_id",0)),
+                "subtitle_id":int(row.get("subtitle_id",row.get("track_id",0))),
+                "line_id":int(row.get("line_id",0)),
+                "bbox":[int(round(float(x))) for x in row["bbox"]],
+                "reconstructed":bool(row.get("reconstructed",False)),
+            }
+            if "source" in row:
+                box["source"]=row["source"]
+            if "confidence" in row:
+                box["confidence"]=row["confidence"]
+            by_frame[fi].append(box)
+        payload["frames"]=[
+            {
+                "frame":i,
+                "timestamp":(i/frame_fps if frame_fps>0 else None),
+                "boxes":by_frame[i],
+            }
+            for i in range(count)
+        ]
     if display_shapes is not None:
         payload["display_shapes"]=display_shapes
     p.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding="utf-8")

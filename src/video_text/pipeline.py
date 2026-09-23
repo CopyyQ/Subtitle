@@ -26,6 +26,7 @@ from .display_shape import (
     draw_line_rectangles,
 )
 from .fast_backend import FastBackend
+from .ppocrv5_backend import PPOCRv5MobileBackend
 from .io import mux_audio, transcode_video, write_coordinate_json
 from .io_probe import bottom_roi, probe_video
 from .lifecycle import reconstruct_tracks, split_tracks_on_geometry, suppress_reconstructed_overlaps
@@ -62,8 +63,11 @@ from .v1_processor import (
 @dataclass(slots=True)
 class PipelineConfig:
     roi_bottom_fraction: float=.45
-    high_score: float=.88
-    low_score: float=.60
+    detector: str="ppocrv5_mobile"
+    high_score: float=.84
+    low_score: float=.50
+    ppocr_thresh: float=.30
+    ppocr_box_thresh: float=.50
     high_min_area: int=250
     low_min_area: int=30
     max_internal_gap: int=2
@@ -83,6 +87,14 @@ class PipelineConfig:
     def __post_init__(self):
         if not .25 <= self.roi_bottom_fraction <= .45:
             raise ValueError("roi_bottom_fraction must be within 0.25..0.45")
+        if self.detector not in {"ppocrv5_mobile","fast"}:
+            raise ValueError("detector must be ppocrv5_mobile or fast")
+        if not 0.0 <= self.low_score <= self.high_score <= 1.0:
+            raise ValueError("low_score/high_score must satisfy 0 <= low_score <= high_score <= 1")
+        if not 0.0 <= self.ppocr_thresh <= 1.0:
+            raise ValueError("ppocr_thresh must be within 0..1")
+        if not 0.0 <= self.ppocr_box_thresh <= 1.0:
+            raise ValueError("ppocr_box_thresh must be within 0..1")
         if self.output_codec not in {"h264","h265"}:
             raise ValueError("output_codec must be h264 or h265")
         if self.max_internal_gap not in {1,2}:
@@ -156,14 +168,24 @@ class SubtitlePipeline:
         self.recognizer=recognizer
 
     def _default_backend(self):
-        root=Path(__file__).resolve().parents[2]
-        repo,checkpoint=_default_fast_paths(root)
         device=resolve_device(self.config.device)
-        precision=resolve_precision(self.config.precision,device)
         configure_runtime(
             device,
             self.config.cpu_threads if self.config.cpu_threads>0 else None,
         )
+        if self.config.detector=="ppocrv5_mobile":
+            return PPOCRv5MobileBackend(
+                device=device,
+                batch_size=self.config.batch_size,
+                high_score=self.config.high_score,
+                low_score=self.config.low_score,
+                thresh=self.config.ppocr_thresh,
+                box_thresh=self.config.ppocr_box_thresh,
+            )
+
+        root=Path(__file__).resolve().parents[2]
+        repo,checkpoint=_default_fast_paths(root)
+        precision=resolve_precision(self.config.precision,device)
         return FastBackend(
             repo,
             checkpoint,

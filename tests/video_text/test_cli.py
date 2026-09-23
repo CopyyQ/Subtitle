@@ -63,6 +63,11 @@ def test_production_cli_defaults_to_detection_only_auto_runtime():
     assert args.batch_size==16
     assert args.cpu_threads==0
     assert args.box_thickness==2
+    assert args.detector=="ppocrv5_mobile"
+    assert args.high_score==.84
+    assert args.low_score==.50
+    assert args.ppocr_thresh==.30
+    assert args.ppocr_box_thresh==.50
     assert args.validate_chinese is False
 
 

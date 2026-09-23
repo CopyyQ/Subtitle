@@ -23,8 +23,11 @@ def build_parser():
     p.add_argument("--output")
     p.add_argument("--roi-bottom-fraction",type=roi_fraction,default=.45)
     p.add_argument("--codec",choices=["h264","h265"],default="h264")
-    p.add_argument("--high-score",type=float,default=.88)
-    p.add_argument("--low-score",type=float,default=.60)
+    p.add_argument("--detector",choices=["ppocrv5_mobile","fast"],default="ppocrv5_mobile")
+    p.add_argument("--high-score",type=float,default=.84)
+    p.add_argument("--low-score",type=float,default=.50)
+    p.add_argument("--ppocr-thresh",type=float,default=.30)
+    p.add_argument("--ppocr-box-thresh",type=float,default=.50)
     p.add_argument("--high-min-area",type=int,default=250)
     p.add_argument("--low-min-area",type=int,default=30)
     p.add_argument("--max-internal-gap",type=int,choices=[1,2],default=2)
@@ -67,7 +70,9 @@ def main(argv=None):
         p.error("--output is required unless --dry-probe is used")
     cfg=PipelineConfig(
         roi_bottom_fraction=args.roi_bottom_fraction,
+        detector=args.detector,
         high_score=args.high_score,low_score=args.low_score,
+        ppocr_thresh=args.ppocr_thresh,ppocr_box_thresh=args.ppocr_box_thresh,
         high_min_area=args.high_min_area,low_min_area=args.low_min_area,
         max_internal_gap=args.max_internal_gap,
         smoothing_window=args.smoothing_window,

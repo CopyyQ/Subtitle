@@ -585,6 +585,28 @@ def _guard_temporal_candidate_edges(
     anchor = np.asarray(anchor, dtype=np.float32).copy()
     candidate = np.asarray(candidate, dtype=np.float32)
     if recognizer is None:
+        aw=float(anchor[2]-anchor[0])
+        ah=float(anchor[3]-anchor[1])
+        cw=float(candidate[2]-candidate[0])
+        ch=float(candidate[3]-candidate[1])
+        if aw<=0 or ah<=0 or cw<=0 or ch<=0:
+            return anchor
+        old_area=aw*ah
+        new_area=cw*ch
+        inside=(
+            float(candidate[0])>=float(anchor[0])-0.5
+            and float(candidate[1])>=float(anchor[1])-0.5
+            and float(candidate[2])<=float(anchor[2])+0.5
+            and float(candidate[3])<=float(anchor[3])+0.5
+        )
+        area_ratio=new_area/max(old_area,1e-6)
+        if (
+            inside
+            and cw>=.70*aw
+            and ch>=.60*ah
+            and .45<=area_ratio<=.98
+        ):
+            return candidate.copy()
         return anchor
 
     ids = _sample_ids(sample_ids, min(3, len(sample_ids)))
@@ -965,9 +987,34 @@ def merge_v1_same_content_tracks(
             and visual_sim >= .70
             and min(len_a, len_b) <= 5
         )
+        no_text_evidence=not texts_a and not texts_b
+        box_a=np.median(
+            np.stack([o.bbox for o in by_id[a_id].observations.values()]),
+            axis=0,
+        )
+        box_b=np.median(
+            np.stack([o.bbox for o in by_id[b_id].observations.values()]),
+            axis=0,
+        )
+        wa=max(1.0,float(box_a[2]-box_a[0]))
+        ha=max(1.0,float(box_a[3]-box_a[1]))
+        wb=max(1.0,float(box_b[2]-box_b[0]))
+        hb=max(1.0,float(box_b[3]-box_b[1]))
+        width_ratio=wa/wb
+        height_ratio=ha/hb
+        visual_only_match=(
+            no_text_evidence
+            and gap<=1
+            and visual_sim>=.94
+            and .85<=width_ratio<=1.18
+            and .85<=height_ratio<=1.18
+        )
         should_merge = (
-            visual_sim >= .65
-            and (strong_text_match or short_fragment_match)
+            (
+                visual_sim >= .65
+                and (strong_text_match or short_fragment_match)
+            )
+            or visual_only_match
         )
         pair_metrics.append(
             {
@@ -1446,12 +1493,22 @@ def apply_v1_static_geometry_lock(
                 frame_width=frame_width,
                 max_shift_px=4.0,
             )
-            seam_adjustments += _fixed_multiline_seam(
-                video_path,
-                ordered,
-                common,
-                sample_count=sample_count,
-            )
+            # Temporal fragments assigned to one logical subtitle do not
+            # necessarily coexist on the same frames. A global intersection
+            # can therefore be empty even though adjacent line pairs overlap
+            # for part of the lifecycle. Resolve seams pair-by-pair using
+            # only the frames where that pair actually coexists.
+            for top_track, bottom_track in zip(ordered, ordered[1:]):
+                pair_common = sorted(
+                    set(top_track.sorted_frames())
+                    & set(bottom_track.sorted_frames())
+                )
+                seam_adjustments += _fixed_multiline_seam(
+                    video_path,
+                    [top_track, bottom_track],
+                    pair_common,
+                    sample_count=sample_count,
+                )
 
         for fi in common:
             for a, b in zip(ordered, ordered[1:]):

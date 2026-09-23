@@ -42,6 +42,9 @@ class FastBackend:
         repo,
         checkpoint,
         device="cuda",
+        precision="fp32",
+        batch_size=16,
+        pin_memory=True,
         high_score=.88,
         low_score=.75,
         high_min_area=250,
@@ -65,8 +68,17 @@ class FastBackend:
         model.load_state_dict(sd,strict=True)
         model=rep_model_convert(model)
         model=fuse_module(model)
-        self.model=model.to(device).eval()
-        self.device=device
+        self.device=torch.device(device)
+        self.precision=str(precision).lower()
+        if self.precision not in {"fp32","fp16"}:
+            raise ValueError("precision must be fp32 or fp16")
+        if self.precision=="fp16" and self.device.type!="cuda":
+            raise ValueError("fp16 is supported only on CUDA")
+        self.batch_size=int(batch_size)
+        if self.batch_size<=0:
+            raise ValueError("batch_size must be positive")
+        self.pin_memory=bool(pin_memory and self.device.type=="cuda")
+        self.model=model.to(self.device).eval()
         self.high_score=float(high_score)
         self.low_score=float(low_score)
         self.high_min_area=int(high_min_area)
@@ -98,13 +110,20 @@ class FastBackend:
             rgb=cv2.cvtColor(x,cv2.COLOR_BGR2RGB).astype(np.float32)/255.0
             batch[i,:,:x.shape[0],:x.shape[1]]=(rgb.transpose(2,0,1)-mean)/std
             sizes.append(x.shape[:2])
-        return torch.from_numpy(batch).to(self.device),orig,sizes
+        host=torch.from_numpy(batch)
+        if self.pin_memory:
+            host=host.pin_memory()
+        x=host.to(self.device,non_blocking=self.pin_memory)
+        return x,orig,sizes
 
     def _forward_model(self,x):
         self.forward_calls += 1
-        f=self.model.backbone(x)
-        f=self.model.neck(f)
-        return self.model.det_head(f)
+        enabled=self.device.type=="cuda" and self.precision=="fp16"
+        with torch.autocast(device_type="cuda",dtype=torch.float16,enabled=enabled):
+            f=self.model.backbone(x)
+            f=self.model.neck(f)
+            out=self.model.det_head(f)
+        return out
 
     def _decode_scored_components(self,out,origs,sizes):
         B=out.shape[0]
@@ -113,7 +132,7 @@ class FastBackend:
         pool=max(1,self.model.det_head.pooling_size//2+1)
         texts=F.max_pool2d(texts,kernel_size=pool,stride=1,padding=pool//2)
         scores=torch.sigmoid(texts)
-        scores=F.interpolate(scores,size=(H,W),mode="nearest").squeeze(1).cpu().numpy()
+        scores=F.interpolate(scores,size=(H,W),mode="nearest").squeeze(1).float().cpu().numpy()
         kernels=(out[:,0]>0).to(torch.uint8).cpu().numpy()
         results=[]
         for bi in range(B):
@@ -153,6 +172,21 @@ class FastBackend:
                 comps.append(ScoredComponent(bbox,sc,area))
             results.append(comps)
         return results
+
+    @torch.inference_mode()
+    def warmup(self,image_shape,batch_size=None):
+        h,w,c=[int(v) for v in image_shape]
+        if h<=0 or w<=0 or c!=3:
+            raise ValueError("image_shape must be positive HxWx3")
+        count=int(batch_size or self.batch_size)
+        if count<=0:
+            raise ValueError("batch_size must be positive")
+        images=[np.zeros((h,w,c),np.uint8) for _ in range(count)]
+        x,_,_=self._prep(images)
+        for _ in range(3):
+            self._forward_model(x)
+        if self.device.type=="cuda":
+            torch.cuda.synchronize(self.device)
 
     @torch.inference_mode()
     def detect_batch(self,images):

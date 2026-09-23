@@ -2,7 +2,9 @@ from pathlib import Path
 import json
 import cv2
 import numpy as np
+import torch
 from src.video_text.types import Candidate
+from src.video_text.io_probe import probe_video
 from src.video_text.pipeline import PipelineConfig, SubtitlePipeline
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -44,7 +46,7 @@ def test_pipeline_recovers_internal_gap_but_not_true_end_and_reuses_cache():
     for i in list(range(0,5))+list(range(6,10)):
         timeline[i]=([c(box)],[])
     backend=FakeBackend(timeline)
-    cfg=PipelineConfig(validate_chinese=False,roi_bottom_fraction=.45,
+    cfg=PipelineConfig(detector="fast",validate_chinese=False,roi_bottom_fraction=.45,
                        max_internal_gap=2,smoothing_window=5,output_codec="h264")
     p=SubtitlePipeline(cfg,backend=backend)
     out1=WORK/"out1.mp4"
@@ -64,6 +66,15 @@ def test_pipeline_recovers_internal_gap_but_not_true_end_and_reuses_cache():
     out2=WORK/"out2.mp4"
     p.run(src,out2,max_frames=13)
     assert backend.calls==first_calls
+    for key in (
+        "detection_loop_seconds","temporal_postprocess_seconds",
+        "render_encode_seconds","source_duration_seconds",
+        "real_time_factor","detector_latency_mean_ms",
+        "detector_latency_p50_ms","detector_latency_p95_ms",
+        "output_frame_count","dropped_frame_count",
+        "device","precision","batch_size","cpu_threads",
+    ):
+        assert key in r1.metrics
 
 
 def test_pipeline_recovers_leading_glyph_extent_before_tracking():
@@ -90,6 +101,7 @@ def test_pipeline_recovers_leading_glyph_extent_before_tracking():
     }
     backend=FakeBackend(timeline)
     cfg=PipelineConfig(
+        detector="fast",
         validate_chinese=False,
         roi_bottom_fraction=.45,
         max_internal_gap=2,
@@ -118,6 +130,7 @@ def test_pipeline_does_not_bridge_when_actual_same_line_detection_already_exists
     }
     backend=FakeBackend(timeline)
     cfg=PipelineConfig(
+        detector="fast",
         validate_chinese=False,
         roi_bottom_fraction=.45,
         max_internal_gap=2,
@@ -147,3 +160,168 @@ def test_default_fast_paths_use_single_model_layout():
 
     assert repo == root/"model/FAST"
     assert checkpoint == repo/"checkpoints/fast_base_ic15_736_finetune_ic17mlt.pth"
+
+
+def test_cpu_detection_never_synchronizes_cuda_when_cuda_is_present(monkeypatch):
+    WORK.mkdir(parents=True,exist_ok=True)
+    src=WORK/"cpu_no_cuda_sync.mp4"
+    make_video(src,n=2)
+    backend=FakeBackend({})
+    backend.device=torch.device("cpu")
+    backend.batch_size=2
+    sync_calls=[]
+    monkeypatch.setattr(torch.cuda,"is_available",lambda: True)
+    monkeypatch.setattr(torch.cuda,"synchronize",lambda *a,**k: sync_calls.append(True))
+    pipeline=SubtitlePipeline(
+        PipelineConfig(
+            validate_chinese=False,
+            device="cpu",
+            batch_size=2,
+        ),
+        backend=backend,
+    )
+    info=probe_video(src)
+    cache=WORK/"cpu_no_cuda_sync.cache.json"
+    cache.unlink(missing_ok=True)
+    frames,_,_=pipeline._detect(src,info,2,cache)
+    assert len(frames)==2
+    assert sync_calls==[]
+
+
+def test_cpu_full_run_does_not_touch_cuda_runtime_when_cuda_is_present(monkeypatch):
+    WORK.mkdir(parents=True,exist_ok=True)
+    src=WORK/"cpu_no_cuda_runtime.mp4"
+    make_video(src,n=2)
+    backend=FakeBackend({})
+    backend.device=torch.device("cpu")
+    backend.batch_size=2
+    calls=[]
+    monkeypatch.setattr(torch.cuda,"is_available",lambda: True)
+    monkeypatch.setattr(torch.cuda,"synchronize",lambda *a,**k: calls.append("sync"))
+    monkeypatch.setattr(torch.cuda,"empty_cache",lambda *a,**k: calls.append("empty"))
+    monkeypatch.setattr(torch.cuda,"reset_peak_memory_stats",lambda *a,**k: calls.append("reset"))
+    monkeypatch.setattr(torch.cuda,"max_memory_allocated",lambda *a,**k: calls.append("max") or 0)
+    out=WORK/"cpu_no_cuda_runtime_out.mp4"
+    cache=out.parent/f"{src.stem}.video_text_cache.json"
+    cache.unlink(missing_ok=True)
+    result=SubtitlePipeline(
+        PipelineConfig(validate_chinese=False,device="cpu",batch_size=2),
+        backend=backend,
+    ).run(src,out,max_frames=2)
+    assert result.metrics["peak_vram_mb"]==0.0
+    assert calls==[]
+
+
+def test_ppocr_pipeline_uses_light_temporal_path_and_labels_low_backfill():
+    WORK.mkdir(parents=True,exist_ok=True)
+    src=WORK/"ppocr_integration.mp4"
+    make_video(src,n=4)
+    box=[20,4,95,20]
+    timeline={
+        0:([],[c(box,.65,"LOW")]),
+        1:([c(box,.94,"HIGH")],[]),
+        2:([c(box,.95,"HIGH")],[]),
+        3:([c(box,.95,"HIGH")],[]),
+    }
+    backend=FakeBackend(timeline)
+    backend.device=torch.device("cpu")
+    backend.batch_size=4
+    out=WORK/"ppocr_integration_out.mp4"
+    cache=out.parent/f"{src.stem}.video_text_cache.json"
+    cache.unlink(missing_ok=True)
+
+    result=SubtitlePipeline(
+        PipelineConfig(
+            detector="ppocrv5_mobile",
+            device="cpu",
+            validate_chinese=False,
+            roi_bottom_fraction=.45,
+        ),
+        backend=backend,
+    ).run(src,out,max_frames=4)
+
+    data=json.loads(result.coordinate_json.read_text())
+    assert result.metrics["detector_name"]=="PP-OCRv5_mobile_det"
+    assert result.metrics["ppocr_track_count"]==1
+    assert len(data["frames"])==4
+    frame0=data["frames"][0]["boxes"]
+    assert len(frame0)==1
+    assert frame0[0]["source"]=="PP_LOW_BACKFILL"
+    assert data["metadata"]["ppocr_thresh"]==.30
+    assert data["metadata"]["ppocr_box_thresh"]==.50
+
+
+def test_cache_signature_changes_with_detector_and_ppocr_thresholds(tmp_path):
+    source=tmp_path/"source.mp4"
+    source.write_bytes(b"cache-signature")
+    pp_a=SubtitlePipeline(PipelineConfig(
+        detector="ppocrv5_mobile",
+        ppocr_thresh=.30,
+        ppocr_box_thresh=.50,
+    ))._signature(source,10)
+    pp_b=SubtitlePipeline(PipelineConfig(
+        detector="ppocrv5_mobile",
+        ppocr_thresh=.20,
+        ppocr_box_thresh=.40,
+    ))._signature(source,10)
+    fast=SubtitlePipeline(PipelineConfig(
+        detector="fast",
+        high_score=.84,
+        low_score=.50,
+    ))._signature(source,10)
+
+    assert pp_a!=pp_b
+    assert pp_a!=fast
+    assert pp_a["detector_model"]=="PP-OCRv5_mobile_det"
+
+
+def test_ppocr_gpu_detection_prefetches_without_torch_cuda_sync(monkeypatch):
+    WORK.mkdir(parents=True,exist_ok=True)
+    src=WORK/"ppocr_prefetch_no_sync.mp4"
+    make_video(src,n=8)
+    backend=FakeBackend({})
+    backend.device=torch.device("cuda")
+    backend.batch_size=4
+    sync_calls=[]
+    monkeypatch.setattr(
+        "src.video_text.pipeline.synchronize",
+        lambda device: sync_calls.append(str(device)),
+    )
+    pipeline=SubtitlePipeline(
+        PipelineConfig(
+            detector="ppocrv5_mobile",
+            device="cuda",
+            batch_size=4,
+            decode_prefetch_batches=2,
+            validate_chinese=False,
+        ),
+        backend=backend,
+    )
+    info=probe_video(src)
+    cache=WORK/"ppocr_prefetch_no_sync.cache.json"
+    cache.unlink(missing_ok=True)
+    frames,_,_=pipeline._detect(src,info,8,cache)
+    assert [f.frame_index for f in frames]==list(range(8))
+    assert backend.calls==2
+    assert sync_calls==[]
+
+
+def test_ppocr_default_backend_forwards_cpu_threads(monkeypatch):
+    import src.video_text.pipeline as pipeline_module
+
+    captured = {}
+
+    class DummyPPOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline_module, "PPOCRv5MobileBackend", DummyPPOCR)
+    monkeypatch.setattr(pipeline_module, "configure_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_module, "resolve_device", lambda requested: torch.device("cpu"))
+
+    pipe = SubtitlePipeline(
+        PipelineConfig(detector="ppocrv5_mobile", device="cpu", cpu_threads=12)
+    )
+    pipe._default_backend()
+
+    assert captured["cpu_threads"] == 12

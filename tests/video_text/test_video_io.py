@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
+from src.video_text.display_shape import draw_line_rectangles
 from src.video_text.io import (
     CodecUnavailableError, encode_video, ffmpeg_video_codec,
     mux_audio, write_coordinate_json, write_srt,
@@ -60,6 +61,36 @@ def test_mux_does_not_truncate_video_when_source_audio_is_shorter():
     assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT))==20
     cap.release()
 
+def test_coordinate_json_contains_every_processed_frame_with_empty_boxes():
+    p=_work("json")/"coords_per_frame.json"
+    write_coordinate_json(
+        p,
+        {"fps":30},
+        [{"frame":1,"timestamp":1/30,"track_id":6,"subtitle_id":6,"line_id":0,
+          "bbox":[1,2,30,40],"reconstructed":False}],
+        [],
+        frame_count=3,
+        fps=30.0,
+    )
+    d=json.loads(p.read_text())
+    assert len(d["frames"])==3
+    assert d["frames"][0]["boxes"]==[]
+    assert len(d["frames"][1]["boxes"])==1
+    assert d["frames"][1]["boxes"][0]["bbox"]==[1,2,30,40]
+    assert d["frames"][2]["boxes"]==[]
+
+
+def test_line_rectangle_renderer_keeps_interior_unfilled():
+    frame=np.zeros((80,120,3),np.uint8)
+    draw_line_rectangles(
+        frame,
+        [{"bbox":[20,20,100,60],"track_id":1,"subtitle_id":1,"line_id":0}],
+        thickness=2,
+    )
+    assert frame[40,60].tolist()==[0,0,0]
+    assert frame[20,60].any()
+
+
 def test_coordinate_json_can_store_display_polygons():
     p=_work("json")/"coords_with_shapes.json"
     shapes=[{
@@ -77,3 +108,39 @@ def test_coordinate_json_can_store_display_polygons():
     )
     d=json.loads(p.read_text())
     assert d["display_shapes"]==shapes
+
+
+def test_mux_handles_source_without_audio_without_changing_frame_count():
+    tmp_path=_work("mux_no_audio")
+    ff="/snap/bin/ffmpeg"
+    video=tmp_path/"video.mp4"
+    source=tmp_path/"source.mp4"
+    out=tmp_path/"mux.mp4"
+    subprocess.run([ff,"-y","-loglevel","error","-f","lavfi","-i",
+                    "testsrc=size=96x64:rate=10:duration=1",
+                    "-c:v","libx264","-pix_fmt","yuv420p",str(video)],check=True)
+    shutil.copyfile(video,source)
+    mux_audio(video,source,out)
+    cap=cv2.VideoCapture(str(out))
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT))==10
+    cap.release()
+
+
+def test_mux_longer_source_audio_does_not_add_video_frames():
+    tmp_path=_work("mux_long_audio")
+    ff="/snap/bin/ffmpeg"
+    video=tmp_path/"video.mp4"
+    source=tmp_path/"source.mp4"
+    out=tmp_path/"mux.mp4"
+    subprocess.run([ff,"-y","-loglevel","error","-f","lavfi","-i",
+                    "testsrc=size=96x64:rate=10:duration=1",
+                    "-c:v","libx264","-pix_fmt","yuv420p",str(video)],check=True)
+    subprocess.run([ff,"-y","-loglevel","error","-f","lavfi","-i",
+                    "color=size=96x64:rate=10:duration=1",
+                    "-f","lavfi","-i","sine=frequency=1000:duration=3",
+                    "-map","0:v","-map","1:a","-c:v","libx264",
+                    "-pix_fmt","yuv420p","-c:a","aac",str(source)],check=True)
+    mux_audio(video,source,out)
+    cap=cv2.VideoCapture(str(out))
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT))==10
+    cap.release()

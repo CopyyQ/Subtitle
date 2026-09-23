@@ -8,6 +8,7 @@ import numpy as np
 from .association import AssociationConfig, build_provisional_tracks
 from .lifecycle import split_tracks_on_geometry
 from .types import SubtitleTrack, TrackObservation
+from .text_enhancement import white_black_text_mask
 from .v5_content_split import _track_crop
 from .v5_extent import consensus_slot_bbox
 from .v5_processor import (
@@ -109,6 +110,66 @@ def _count_cross_slot_recoveries(weak,coverage,priors):
     return count
 
 
+def _slot_geometry_matches(
+    box,
+    prior,
+    *,
+    max_center_offset_heights=.35,
+    min_height_ratio=.70,
+    max_height_ratio=1.20,
+):
+    b=np.asarray(box,dtype=np.float32)
+    ph=max(1.0,float(prior.expected_height))
+    bh=max(0.0,float(b[3]-b[1]))
+    cx=.5*(float(b[0])+float(b[2]))
+    if abs(cx-float(prior.expected_x_center)) > float(max_center_offset_heights)*ph:
+        return False
+    ratio=bh/ph
+    return float(min_height_ratio) <= ratio <= float(max_height_ratio)
+
+
+def _weak_birth_visual_gate(
+    frame,
+    box,
+    prior,
+    *,
+    min_mask_density=.40,
+):
+    if box is None or not _slot_geometry_matches(box,prior):
+        return None
+    h,w=frame.shape[:2]
+    b=np.asarray(box,dtype=np.float32)
+    x1=max(0,int(np.floor(float(b[0]))))
+    y1=max(0,int(np.floor(float(b[1]))))
+    x2=min(w,int(np.ceil(float(b[2]))))
+    y2=min(h,int(np.ceil(float(b[3]))))
+    if x2<=x1 or y2<=y1:
+        return None
+    mask=white_black_text_mask(frame[y1:y2,x1:x2])
+    if mask.size==0 or float(np.mean(mask>0)) < float(min_mask_density):
+        return None
+    return b
+
+
+def filter_v55_pixel_only_tracks(tracks,priors):
+    priors=list(priors)
+    kept=[]
+    rejected=0
+    for track in tracks:
+        fs=track.sorted_frames()
+        if not fs:
+            rejected+=1
+            continue
+        boxes=np.stack([track.observations[fi].bbox for fi in fs],axis=0)
+        box=np.median(boxes,axis=0).astype(np.float32)
+        slot=_nearest_slot_index(box,priors)
+        if slot is None or not _slot_geometry_matches(box,priors[slot]):
+            rejected+=1
+            continue
+        kept.append(track)
+    return kept,rejected
+
+
 def discover_v55_weak_tracks(
     video_path,
     strong_tracks,
@@ -148,6 +209,7 @@ def discover_v55_weak_tracks(
                 tracker.update(fi,None)
                 continue
             box=detect_weak_text_in_slot(frame,prior)
+            box=_weak_birth_visual_gate(frame,box,prior)
             emitted[i].extend(tracker.update(fi,box))
 
     cap.release()

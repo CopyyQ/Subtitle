@@ -46,7 +46,7 @@ def test_pipeline_v55_emits_two_independent_line_rectangles():
     src=WORK/"two_line.mp4"
     _make_video(src)
     out=WORK/"v55.mp4"
-    cfg=PipelineConfig(
+    cfg=PipelineConfig(detector="fast",
         temporal_mode="v5_5",
         validate_chinese=False,
         roi_bottom_fraction=.45,
@@ -84,10 +84,10 @@ def test_pipeline_v55_emits_two_independent_line_rectangles():
 def test_v55_signature_differs_from_v5_for_same_source():
     src=WORK/"signature.mp4"
     _make_video(src,n=1)
-    p5=SubtitlePipeline(PipelineConfig(
+    p5=SubtitlePipeline(PipelineConfig(detector="fast",
         temporal_mode="v5",validate_chinese=False
     ),backend=FakeBackend())
-    p55=SubtitlePipeline(PipelineConfig(
+    p55=SubtitlePipeline(PipelineConfig(detector="fast",
         temporal_mode="v5_5",validate_chinese=False
     ),backend=FakeBackend())
     s5=p5._signature(src,1)
@@ -126,7 +126,7 @@ def test_weak_validation_uses_separated_bbox_not_overlapping_strong_text():
                 return "中",.99
             return "",0.0
 
-    pipe=SubtitlePipeline(PipelineConfig(
+    pipe=SubtitlePipeline(PipelineConfig(detector="fast",
         temporal_mode="v5_5",validate_chinese=True
     ))
     kept,rejected=pipe._validate_v55_weak_post_separation(

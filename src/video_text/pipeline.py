@@ -5,6 +5,8 @@ from pathlib import Path
 import copy
 import json
 import math
+import queue
+import threading
 import time
 
 import cv2
@@ -12,6 +14,7 @@ import numpy as np
 import torch
 
 from .association import AssociationConfig, build_provisional_tracks
+from .benchmark import collect_environment_metadata, latency_summary, real_time_factor
 from .chinese_validator import (
     EasyOCRChineseRecognizer,
     representative_frames,
@@ -25,13 +28,22 @@ from .display_shape import (
     draw_line_rectangles,
 )
 from .fast_backend import FastBackend
-from .io import mux_audio, transcode_video, write_coordinate_json
+from .ppocrv5_backend import PPOCRv5MobileBackend
+from .ppocr_temporal import (
+    PPOCRTemporalConfig,
+    build_ppocr_temporal_tracks,
+    canonicalize_ppocr_tracks,
+    clamp_ppocr_multiline_seams,
+    recover_ppocr_short_lines,
+)
+from .io import encode_raw_frames_with_audio, write_coordinate_json
 from .io_probe import bottom_roi, probe_video
 from .lifecycle import reconstruct_tracks, split_tracks_on_geometry, suppress_reconstructed_overlaps
 from .line_grouping import group_candidates_to_lines
 from .line_split import split_frame_detections_by_projection
 from .horizontal_recovery import recover_tracks_horizontal_extents
 from .review import export_event_contact_sheet
+from .runtime import configure_runtime, resolve_device, resolve_precision, synchronize
 from .smoothing import smooth_tracks, synchronize_tracks
 from .types import Candidate, FrameDetections
 from .v5_processor import (
@@ -60,24 +72,62 @@ from .v1_processor import (
 @dataclass(slots=True)
 class PipelineConfig:
     roi_bottom_fraction: float=.45
-    high_score: float=.88
-    low_score: float=.60
+    detector: str="ppocrv5_mobile"
+    high_score: float=.84
+    low_score: float=.50
+    ppocr_thresh: float=.30
+    ppocr_box_thresh: float=.50
+    ppocr_cpu_engine: str="auto"
+    ppocr_openvino_model: str | None=None
+    ppocr_openvino_streams: int=0
+    ppocr_openvino_fuse_preprocess: bool=True
+    ppocr_adaptive_gating: bool=False
+    ppocr_gate_max_skip_frames: int=2
+    ppocr_gate_change_threshold: float=.02
+    ppocr_gate_bright_net_threshold: float=.0075
     high_min_area: int=250
     low_min_area: int=30
     max_internal_gap: int=2
     smoothing_window: int=5
     output_codec: str="h264"
-    validate_chinese: bool=True
+    output_preset: str="veryfast"
+    validate_chinese: bool=False
     export_srt: bool=False
     outline_pad_ratio: float=.08
     min_outline_pad: int=3
     temporal_mode: str="v1"
+    device: str="auto"
+    precision: str="auto"
+    batch_size: int=32
+    decode_prefetch_batches: int=4
+    cpu_threads: int=0
+    box_thickness: int=2
 
     def __post_init__(self):
         if not .25 <= self.roi_bottom_fraction <= .45:
             raise ValueError("roi_bottom_fraction must be within 0.25..0.45")
+        if self.detector not in {"ppocrv5_mobile","fast"}:
+            raise ValueError("detector must be ppocrv5_mobile or fast")
+        if not 0.0 <= self.low_score <= self.high_score <= 1.0:
+            raise ValueError("low_score/high_score must satisfy 0 <= low_score <= high_score <= 1")
+        if not 0.0 <= self.ppocr_thresh <= 1.0:
+            raise ValueError("ppocr_thresh must be within 0..1")
+        if not 0.0 <= self.ppocr_box_thresh <= 1.0:
+            raise ValueError("ppocr_box_thresh must be within 0..1")
+        if self.ppocr_cpu_engine not in {"auto","openvino","onnxruntime","paddle"}:
+            raise ValueError("ppocr_cpu_engine must be auto, openvino, onnxruntime, or paddle")
+        if self.ppocr_openvino_streams < 0:
+            raise ValueError("ppocr_openvino_streams must be non-negative")
+        if self.ppocr_gate_max_skip_frames < 0:
+            raise ValueError("ppocr_gate_max_skip_frames must be non-negative")
+        if not 0.0 <= self.ppocr_gate_change_threshold <= 1.0:
+            raise ValueError("ppocr_gate_change_threshold must be within 0..1")
+        if not 0.0 <= self.ppocr_gate_bright_net_threshold <= 1.0:
+            raise ValueError("ppocr_gate_bright_net_threshold must be within 0..1")
         if self.output_codec not in {"h264","h265"}:
             raise ValueError("output_codec must be h264 or h265")
+        if self.output_preset not in {"ultrafast","superfast","veryfast","faster","fast","medium"}:
+            raise ValueError("output_preset must be a supported x264/x265 preset")
         if self.max_internal_gap not in {1,2}:
             raise ValueError("max_internal_gap must be 1 or 2")
         if self.smoothing_window<1 or self.smoothing_window%2==0:
@@ -86,6 +136,18 @@ class PipelineConfig:
             raise ValueError("outline padding must be non-negative")
         if self.temporal_mode not in {"v4","v5","v5_5","v1"}:
             raise ValueError("temporal_mode must be v4, v5, v5_5, or v1")
+        if self.device not in {"auto","cpu","cuda"}:
+            raise ValueError("device must be auto, cpu, or cuda")
+        if self.precision not in {"auto","fp32","fp16"}:
+            raise ValueError("precision must be auto, fp32, or fp16")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if self.decode_prefetch_batches < 0:
+            raise ValueError("decode_prefetch_batches must be non-negative")
+        if self.cpu_threads < 0:
+            raise ValueError("cpu_threads must be non-negative")
+        if self.box_thickness <= 0:
+            raise ValueError("box_thickness must be positive")
 
 
 @dataclass(slots=True)
@@ -139,11 +201,39 @@ class SubtitlePipeline:
         self.recognizer=recognizer
 
     def _default_backend(self):
+        device=resolve_device(self.config.device)
+        configure_runtime(
+            device,
+            self.config.cpu_threads if self.config.cpu_threads>0 else None,
+        )
+        if self.config.detector=="ppocrv5_mobile":
+            return PPOCRv5MobileBackend(
+                device=device,
+                batch_size=self.config.batch_size,
+                high_score=self.config.high_score,
+                low_score=self.config.low_score,
+                thresh=self.config.ppocr_thresh,
+                box_thresh=self.config.ppocr_box_thresh,
+                cpu_threads=self.config.cpu_threads,
+                cpu_engine=self.config.ppocr_cpu_engine,
+                openvino_model=self.config.ppocr_openvino_model,
+                openvino_num_streams=self.config.ppocr_openvino_streams,
+                openvino_fuse_preprocess=self.config.ppocr_openvino_fuse_preprocess,
+                adaptive_gating=self.config.ppocr_adaptive_gating,
+                gate_max_skip_frames=self.config.ppocr_gate_max_skip_frames,
+                gate_change_threshold=self.config.ppocr_gate_change_threshold,
+                gate_bright_net_threshold=self.config.ppocr_gate_bright_net_threshold,
+            )
+
         root=Path(__file__).resolve().parents[2]
         repo,checkpoint=_default_fast_paths(root)
+        precision=resolve_precision(self.config.precision,device)
         return FastBackend(
             repo,
             checkpoint,
+            device=device,
+            precision=precision,
+            batch_size=self.config.batch_size,
             high_score=self.config.high_score,
             low_score=self.config.low_score,
             high_min_area=self.config.high_min_area,
@@ -152,14 +242,30 @@ class SubtitlePipeline:
 
     def _signature(self,source,target):
         st=source.stat()
+        detector_model=(
+            PPOCRv5MobileBackend.model_name
+            if self.config.detector=="ppocrv5_mobile"
+            else "FAST-B736"
+        )
         return {
             "source":str(source.resolve()),"size":st.st_size,"mtime_ns":st.st_mtime_ns,
             "target_frames":int(target),
             "roi_bottom_fraction":self.config.roi_bottom_fraction,
             "temporal_mode":self.config.temporal_mode,
+            "detector":self.config.detector,
+            "detector_model":detector_model,
             "high_score":self.config.high_score,"low_score":self.config.low_score,
+            "ppocr_thresh":self.config.ppocr_thresh,
+            "ppocr_box_thresh":self.config.ppocr_box_thresh,
+            "ppocr_cpu_engine":self.config.ppocr_cpu_engine,
+            "ppocr_openvino_model":self.config.ppocr_openvino_model,
+            "ppocr_openvino_streams":self.config.ppocr_openvino_streams,
+            "ppocr_openvino_fuse_preprocess":self.config.ppocr_openvino_fuse_preprocess,
+            "ppocr_adaptive_gating":self.config.ppocr_adaptive_gating,
+            "ppocr_gate_max_skip_frames":self.config.ppocr_gate_max_skip_frames,
+            "ppocr_gate_change_threshold":self.config.ppocr_gate_change_threshold,
+            "ppocr_gate_bright_net_threshold":self.config.ppocr_gate_bright_net_threshold,
             "high_min_area":self.config.high_min_area,"low_min_area":self.config.low_min_area,
-            "backend":type(self.backend).__name__ if self.backend is not None else "FastBackend",
         }
 
     def _cache_path(self,source,output):
@@ -194,44 +300,137 @@ class SubtitlePipeline:
 
     def _detect(self,source,info,target,cache_path):
         signature=self._signature(source,target)
+        self._detector_latency_samples_ms=[]
         cached=self._load_cache(cache_path,signature)
         if cached is not None:
             return cached,0.0,True
         if self.backend is None:
             self.backend=self._default_backend()
             signature=self._signature(source,target)
-        cap=cv2.VideoCapture(str(source))
+        if hasattr(self.backend,"reset_temporal_gate"):
+            self.backend.reset_temporal_gate()
+
         y1,y2=bottom_roi(info.height,self.config.roi_bottom_fraction)
         frames=[]
-        processed=0
         batch_size=int(getattr(self.backend,"batch_size",16))
         detector_seconds=0.0
-        while processed<target:
-            originals=[]; rois=[]
-            for _ in range(min(batch_size,target-processed)):
-                ok,frame=cap.read()
-                if not ok:
-                    break
-                originals.append(frame)
-                rois.append(frame[y1:y2])
-            if not originals:
-                break
+        backend_device=torch.device(
+            getattr(self.backend,"device",resolve_device(self.config.device))
+        )
+        paddle_backend=self.config.detector=="ppocrv5_mobile"
+
+        def detect_batch(frame_start,rois):
+            nonlocal detector_seconds
+            if not paddle_backend:
+                synchronize(backend_device)
             t=time.perf_counter()
             detected=self.backend.detect_batch(rois)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            detector_seconds+=time.perf_counter()-t
-            if len(detected)!=len(originals):
-                cap.release()
+            if not paddle_backend:
+                synchronize(backend_device)
+            batch_elapsed=time.perf_counter()-t
+            detector_seconds+=batch_elapsed
+            per_frame_ms=1000.0*batch_elapsed/max(len(rois),1)
+            self._detector_latency_samples_ms.extend([per_frame_ms]*len(rois))
+            if len(detected)!=len(rois):
                 raise RuntimeError("detector batch length mismatch")
-            for high,low in detected:
+            for offset,(high,low) in enumerate(detected):
                 absolute=[_offset(c,y1) for c in list(high)+list(low)]
-                grouped=group_candidates_to_lines(absolute)
+                if paddle_backend:
+                    grouped=absolute
+                else:
+                    grouped=group_candidates_to_lines(absolute)
                 gh=[c for c in grouped if c.level=="HIGH"]
                 gl=[c for c in grouped if c.level=="LOW"]
-                frames.append(FrameDetections(processed,processed/info.fps,gh,gl))
-                processed+=1
-        cap.release()
+                fi=frame_start+offset
+                frames.append(FrameDetections(fi,fi/info.fps,gh,gl))
+
+        use_prefetch=(
+            paddle_backend
+            and self.config.decode_prefetch_batches>0
+            and target>batch_size
+        )
+        if use_prefetch:
+            batches=queue.Queue(maxsize=self.config.decode_prefetch_batches)
+            stop=threading.Event()
+            producer_errors=[]
+            sentinel=object()
+
+            def put_item(item):
+                while not stop.is_set():
+                    try:
+                        batches.put(item,timeout=.1)
+                        return True
+                    except queue.Full:
+                        continue
+                return False
+
+            def producer():
+                cap=cv2.VideoCapture(str(source))
+                decoded=0
+                try:
+                    while decoded<target and not stop.is_set():
+                        rois=[]
+                        start_index=decoded
+                        for _ in range(min(batch_size,target-decoded)):
+                            ok,frame=cap.read()
+                            if not ok:
+                                break
+                            rois.append(frame[y1:y2].copy())
+                            decoded+=1
+                        if not rois:
+                            break
+                        if not put_item((start_index,rois)):
+                            break
+                    if decoded!=target and not stop.is_set():
+                        producer_errors.append(
+                            RuntimeError(f"decoded {decoded} of {target} requested frames")
+                        )
+                except Exception as exc:
+                    producer_errors.append(exc)
+                finally:
+                    cap.release()
+                    put_item(sentinel)
+
+            thread=threading.Thread(
+                target=producer,
+                name="subtitle-roi-prefetch",
+                daemon=True,
+            )
+            thread.start()
+            try:
+                while True:
+                    item=batches.get()
+                    if item is sentinel:
+                        break
+                    frame_start,rois=item
+                    detect_batch(frame_start,rois)
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            if producer_errors:
+                raise producer_errors[0]
+        else:
+            cap=cv2.VideoCapture(str(source))
+            processed=0
+            try:
+                while processed<target:
+                    rois=[]
+                    frame_start=processed
+                    for _ in range(min(batch_size,target-processed)):
+                        ok,frame=cap.read()
+                        if not ok:
+                            break
+                        rois.append(frame[y1:y2].copy())
+                        processed+=1
+                    if not rois:
+                        break
+                    detect_batch(frame_start,rois)
+            finally:
+                cap.release()
+            if processed!=target:
+                raise RuntimeError(f"decoded {processed} of {target} requested frames")
+
+        frames.sort(key=lambda f:f.frame_index)
         if len(frames)!=target:
             raise RuntimeError(f"decoded {len(frames)} of {target} requested frames")
         self._save_cache(cache_path,signature,frames)
@@ -333,43 +532,42 @@ class SubtitlePipeline:
         by_frame={}
         for r in records:
             by_frame.setdefault(r["frame"],[]).append(r)
-        raw=output.with_name(output.stem+".silent_raw.mp4")
-        encoded=output.with_name(output.stem+".encoded.mp4")
-        cap=cv2.VideoCapture(str(source))
-        writer=cv2.VideoWriter(str(raw),cv2.VideoWriter_fourcc(*"mp4v"),info.fps,(info.width,info.height))
-        if not writer.isOpened():
-            cap.release()
-            raise RuntimeError(f"cannot create temporary output: {raw}")
-        for fi in range(target):
-            ok,frame=cap.read()
-            if not ok:
-                writer.release(); cap.release()
-                raise RuntimeError(f"source ended at frame {fi}")
-            if self.config.temporal_mode in {"v5_5","v1"}:
-                draw_line_rectangles(
-                    frame,
-                    by_frame.get(fi,[]),
-                    color=(0,255,0),
-                    thickness=2,
-                    line_type=cv2.LINE_AA,
-                )
-            else:
-                draw_display_polygons(
-                    frame,
-                    by_frame.get(fi,[]),
-                    color=(0,255,0),
-                    thickness=2,
-                    line_type=cv2.LINE_AA,
-                )
-            writer.write(frame)
-        writer.release(); cap.release()
-        try:
-            transcode_video(raw,encoded,self.config.output_codec)
-            mux_audio(encoded,source,output)
-        finally:
-            for p in (raw,encoded):
-                try: p.unlink()
-                except FileNotFoundError: pass
+
+        def rendered_frames():
+            cap=cv2.VideoCapture(str(source))
+            try:
+                for fi in range(target):
+                    ok,frame=cap.read()
+                    if not ok:
+                        raise RuntimeError(f"source ended at frame {fi}")
+                    if self.config.detector=="ppocrv5_mobile" or self.config.temporal_mode in {"v5_5","v1"}:
+                        draw_line_rectangles(
+                            frame,
+                            by_frame.get(fi,[]),
+                            color=(0,255,0),
+                            thickness=self.config.box_thickness,
+                            line_type=cv2.LINE_AA,
+                        )
+                    else:
+                        draw_display_polygons(
+                            frame,
+                            by_frame.get(fi,[]),
+                            color=(0,255,0),
+                            thickness=self.config.box_thickness,
+                            line_type=cv2.LINE_AA,
+                        )
+                    yield frame
+            finally:
+                cap.release()
+
+        encode_raw_frames_with_audio(
+            rendered_frames(),
+            source_path=source,
+            output_path=output,
+            fps=info.fps,
+            codec=self.config.output_codec,
+            preset=self.config.output_preset,
+        )
 
     def _process_v55(self,source,frames,info,target):
         split_output_count=sum(len(f.high)+len(f.low) for f in frames)
@@ -550,19 +748,18 @@ class SubtitlePipeline:
         v1_transition_metrics={}
         v1_compact_candidates={}
         if self.config.temporal_mode=="v1":
-            if recognizer is not None:
-                (
-                    tracks,
-                    identity,
-                    v1_compact_candidates,
-                    v1_merge_metrics,
-                )=merge_v1_same_content_tracks(
-                    source,
-                    tracks,
-                    identity,
-                    recognizer=recognizer,
-                    max_gap=1,
-                )
+            (
+                tracks,
+                identity,
+                v1_compact_candidates,
+                v1_merge_metrics,
+            )=merge_v1_same_content_tracks(
+                source,
+                tracks,
+                identity,
+                recognizer=recognizer,
+                max_gap=1,
+            )
             (
                 tracks,
                 identity,
@@ -590,31 +787,35 @@ class SubtitlePipeline:
                 pad_px=2,
                 compact_candidates=v1_compact_candidates,
             )
-            glyph_tighten_metrics=(
-                tighten_v1_static_tracks_with_temporal_glyphs(
+            geometry_recognizer=(
+                recognizer
+                if recognizer is not None
+                and getattr(recognizer,"supports_detection",True)
+                else None
+            )
+            glyph_tighten_metrics=tighten_v1_static_tracks_with_temporal_glyphs(
+                source,
+                tracks,
+                identity,
+                geometry_recognizer,
+                sample_count=15,
+                safety_pad=4,
+            )
+            if recognizer is not None and getattr(recognizer,"supports_detection",True):
+                ocr_tighten_metrics=tighten_v1_static_tracks_with_ocr(
                     source,
                     tracks,
                     identity,
                     recognizer,
-                    sample_count=15,
-                    safety_pad=4,
+                    min_height_px=58,
+                    sample_count=3,
+                    safety_pad=2,
                 )
-                if recognizer is not None
-                else {
-                    "glyph_tightened_track_count":0,
-                    "glyph_tightening_area_ratio_median":1.0,
-                    "glyph_center_alignment_adjustment_count":0,
+            else:
+                ocr_tighten_metrics={
+                    "ocr_tightened_track_count":0,
+                    "ocr_tightening_area_ratio_median":1.0,
                 }
-            )
-            ocr_tighten_metrics=tighten_v1_static_tracks_with_ocr(
-                source,
-                tracks,
-                identity,
-                recognizer,
-                min_height_px=58,
-                sample_count=3,
-                safety_pad=2,
-            )
             height_regularize_metrics=regularize_v1_single_line_height(
                 tracks,
                 identity,
@@ -696,6 +897,86 @@ class SubtitlePipeline:
             "identity":identity,
         }
 
+    def _process_ppocr(self,source,frames,info,target):
+        cfg=PPOCRTemporalConfig(
+            max_internal_gap=self.config.max_internal_gap,
+        )
+        strong_tracks,temporal_metrics=build_ppocr_temporal_tracks(
+            frames,
+            frame_width=info.width,
+            frame_height=info.height,
+            config=cfg,
+        )
+        used_low_count=sum(
+            1
+            for track in strong_tracks
+            for obs in track.observations.values()
+            if obs.level=="LOW"
+        )
+        raw_med,raw_p95=_corner_motion(strong_tracks)
+
+        weak_tracks,weak_metrics=recover_ppocr_short_lines(
+            source,
+            strong_tracks,
+            frames,
+            frame_width=info.width,
+            frame_height=info.height,
+            config=cfg,
+        )
+
+        canonical_metrics=canonicalize_ppocr_tracks(
+            strong_tracks,
+            pad=2,
+        )
+        tracks=strong_tracks+weak_tracks
+        seam_metrics=clamp_ppocr_multiline_seams(
+            tracks,
+            min_gap=1,
+        )
+
+        for track in strong_tracks:
+            for obs in track.observations.values():
+                if obs.level=="HIGH":
+                    obs.level="PP_HIGH"
+                elif obs.level=="LOW":
+                    obs.level="PP_LOW_BACKFILL"
+
+        stab_med,stab_p95=_corner_motion(tracks)
+        mode_metrics={
+            **temporal_metrics,
+            **weak_metrics,
+            **canonical_metrics,
+            **seam_metrics,
+            "ppocr_used_low_count":used_low_count,
+            "multiline_overlap_frame_count":seam_metrics[
+                "ppocr_multiline_overlap_frame_count"
+            ],
+            "stabilized_edge_motion_median_px":stab_med,
+            "stabilized_edge_motion_p95_px":stab_p95,
+        }
+        return {
+            "split_output_count":sum(
+                len(frame.high)+len(frame.low)
+                for frame in frames
+            ),
+            "provisional":strong_tracks,
+            "raw_med":raw_med,
+            "raw_p95":raw_p95,
+            "events":[],
+            "suppressed_reconstructed_overlap_count":0,
+            "horizontal_recovery_expanded_count":0,
+            "language_counts":{
+                "validated_chinese":0,
+                "rejected_non_chinese":0,
+                "retained_uncertain":0,
+            },
+            "mode_metrics":mode_metrics,
+            "stab_med":stab_med,
+            "stab_p95":stab_p95,
+            "tracks":tracks,
+            "identity":{},
+        }
+
     def run(self,input_path,output_path,max_frames=0,coordinate_json=None):
         start=time.perf_counter()
         source=Path(input_path).resolve()
@@ -704,17 +985,43 @@ class SubtitlePipeline:
         info=probe_video(source)
         target=min(info.frame_count,int(max_frames)) if max_frames else info.frame_count
         cache_path=self._cache_path(source,output)
-        if torch.cuda.is_available():
+        run_device=torch.device(
+            getattr(self.backend,"device",resolve_device(self.config.device))
+        )
+        if run_device.type=="cuda":
             torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_peak_memory_stats(run_device)
 
+        detection_loop_start=time.perf_counter()
         frames,detector_seconds,cache_hit=self._detect(source,info,target,cache_path)
+        detection_loop_seconds=time.perf_counter()-detection_loop_start
+        temporal_start=time.perf_counter()
 
         split_input_count=sum(len(f.high)+len(f.low) for f in frames)
         v5_metrics={}
         identity={}
 
-        if self.config.temporal_mode in {"v5_5","v1"}:
+        if self.config.detector=="ppocrv5_mobile":
+            state=self._process_ppocr(source,frames,info,target)
+            split_output_count=state["split_output_count"]
+            provisional=state["provisional"]
+            raw_med=state["raw_med"]
+            raw_p95=state["raw_p95"]
+            events=state["events"]
+            suppressed_reconstructed_overlap_count=state[
+                "suppressed_reconstructed_overlap_count"
+            ]
+            horizontal_recovery_expanded_count=state[
+                "horizontal_recovery_expanded_count"
+            ]
+            language_counts=state["language_counts"]
+            v5_metrics=state["mode_metrics"]
+            stab_med=state["stab_med"]
+            stab_p95=state["stab_p95"]
+            tracks=state["tracks"]
+            identity=state["identity"]
+
+        elif self.config.temporal_mode in {"v5_5","v1"}:
             state=self._process_v55(source,frames,info,target)
             split_output_count=state["split_output_count"]
             provisional=state["provisional"]
@@ -913,11 +1220,15 @@ class SubtitlePipeline:
         records=self._records(tracks,identity=identity)
         for r in records:
             r["timestamp"]=r["frame"]/info.fps
-        if self.config.temporal_mode in {"v5_5","v1"}:
+        if self.config.detector=="ppocrv5_mobile" or self.config.temporal_mode in {"v5_5","v1"}:
             display_shapes=build_line_shape_records(records,info.fps)
         else:
             display_shapes=build_display_shape_records(records,info.fps)
+        temporal_postprocess_seconds=time.perf_counter()-temporal_start
+        render_start=time.perf_counter()
         self._render(source,output,records,info,target)
+        render_encode_seconds=time.perf_counter()-render_start
+        production_elapsed_seconds=time.perf_counter()-start
 
         review_dir=output.with_name(output.stem+"_review")
         review_dir.mkdir(parents=True,exist_ok=True)
@@ -926,16 +1237,85 @@ class SubtitlePipeline:
                 export_event_contact_sheet(source,event,review_dir,self.config.roi_bottom_fraction,context=2)
 
         gaps=[e for e in events if e.event_type=="internal_miss_recovered"]
-        used_low=sum(1 for t in provisional for o in t.observations.values() if o.level=="LOW")
+        used_low=(
+            int(v5_metrics.get("ppocr_used_low_count",0))
+            if self.config.detector=="ppocrv5_mobile"
+            else sum(1 for t in provisional for o in t.observations.values() if o.level=="LOW")
+        )
         total_low=sum(len(f.low) for f in frames)
+        actual_device=torch.device(
+            getattr(self.backend,"device",run_device)
+        )
+        actual_precision=str(
+            getattr(
+                self.backend,
+                "precision",
+                resolve_precision(self.config.precision,actual_device),
+            )
+        )
+        actual_batch_size=int(
+            getattr(self.backend,"batch_size",self.config.batch_size)
+        )
+        actual_cpu_threads=(
+            int(torch.get_num_threads()) if actual_device.type=="cpu" else 0
+        )
+        latency=latency_summary(
+            getattr(self,"_detector_latency_samples_ms",[])
+        )
+        source_duration_seconds=target/max(info.fps,1e-9)
+        detector_name=(
+            getattr(self.backend,"model_name",None)
+            or ("PP-OCRv5_mobile_det" if self.config.detector=="ppocrv5_mobile" else "FAST-B736")
+        )
         metrics={
             "frames":target,"source_fps":info.fps,"width":info.width,"height":info.height,
+            "source_codec":info.fourcc,
+            "output_codec":self.config.output_codec,
+            "output_preset":self.config.output_preset,
+            "source_duration_seconds":source_duration_seconds,
+            "detector_name":detector_name,
+            "detector":self.config.detector,
             "roi_bottom_fraction":self.config.roi_bottom_fraction,
+            "high_score":self.config.high_score,
+            "low_score":self.config.low_score,
+            "ppocr_thresh":self.config.ppocr_thresh,
+            "ppocr_box_thresh":self.config.ppocr_box_thresh,
+            "ppocr_cpu_engine":getattr(self.backend,"cpu_engine",None) or self.config.ppocr_cpu_engine,
+            "ppocr_openvino_model":self.config.ppocr_openvino_model,
+            "ppocr_openvino_streams_requested":self.config.ppocr_openvino_streams,
+            "ppocr_openvino_streams_actual":getattr(getattr(self.backend,"predictor",None),"num_streams",None),
+            "ppocr_openvino_optimal_requests":getattr(getattr(self.backend,"predictor",None),"optimal_requests",None),
+            "ppocr_openvino_inference_threads":getattr(getattr(self.backend,"predictor",None),"inference_num_threads",None),
+            "ppocr_openvino_fuse_preprocess":self.config.ppocr_openvino_fuse_preprocess,
+            "ppocr_adaptive_gating":self.config.ppocr_adaptive_gating,
+            "ppocr_gate_max_skip_frames":self.config.ppocr_gate_max_skip_frames,
+            "ppocr_gate_change_threshold":self.config.ppocr_gate_change_threshold,
+            "ppocr_gate_bright_net_threshold":self.config.ppocr_gate_bright_net_threshold,
+            "ppocr_gate_total_frames":getattr(self.backend,"gate_total_frames",0),
+            "ppocr_gate_inferred_frames":getattr(self.backend,"gate_inferred_frames",target),
+            "ppocr_gate_skipped_frames":getattr(self.backend,"gate_skipped_frames",0),
+            "ppocr_gate_skip_ratio":(
+                getattr(self.backend,"gate_skipped_frames",0)
+                / max(getattr(self.backend,"gate_total_frames",target),1)
+            ),
             "temporal_mode":self.config.temporal_mode,
+            "device":actual_device.type,
+            "precision":actual_precision,
+            "batch_size":actual_batch_size,
+            "cpu_threads":actual_cpu_threads,
+            "detection_loop_seconds":detection_loop_seconds,
             "detector_seconds":detector_seconds,
             "detector_fps":None if detector_seconds<=0 else target/detector_seconds,
+            "detector_latency_mean_ms":latency["mean_ms"],
+            "detector_latency_p50_ms":latency["p50_ms"],
+            "detector_latency_p95_ms":latency["p95_ms"],
+            "temporal_postprocess_seconds":temporal_postprocess_seconds,
+            "render_encode_seconds":render_encode_seconds,
             "cache_hit":cache_hit,
-            "peak_vram_mb":float(torch.cuda.max_memory_allocated()/1024**2) if torch.cuda.is_available() else 0.0,
+            "peak_vram_mb":(
+                float(torch.cuda.max_memory_allocated(run_device)/1024**2)
+                if run_device.type=="cuda" else 0.0
+            ),
             "high_candidate_count":sum(len(f.high) for f in frames),
             "low_candidate_count":total_low,
             "line_split_input_candidate_count":split_input_count,
@@ -963,8 +1343,18 @@ class SubtitlePipeline:
             **language_counts,
             **v5_metrics,
         }
-        metrics["elapsed_seconds"]=time.perf_counter()-start
-        metrics["end_to_end_fps"]=target/max(metrics["elapsed_seconds"],1e-9)
+        metrics["elapsed_seconds"]=production_elapsed_seconds
+        metrics["end_to_end_fps"]=target/max(production_elapsed_seconds,1e-9)
+        metrics["real_time_factor"]=real_time_factor(
+            production_elapsed_seconds,source_duration_seconds
+        )
+        metrics["output_frame_count"]=target
+        metrics["dropped_frame_count"]=0
+        root=Path(__file__).resolve().parents[2]
+        _,checkpoint=_default_fast_paths(root)
+        metrics["environment"]=collect_environment_metadata(
+            root,checkpoint,detector_name=detector_name
+        )
 
         coordinate_path=Path(coordinate_json).resolve() if coordinate_json else output.with_suffix(".json")
         metadata={"input":str(source),"output":str(output),**metrics}
@@ -974,5 +1364,7 @@ class SubtitlePipeline:
             records,
             events,
             display_shapes=display_shapes,
+            frame_count=target,
+            fps=info.fps,
         )
         return PipelineResult(output,coordinate_path,review_dir,cache_path,metrics)

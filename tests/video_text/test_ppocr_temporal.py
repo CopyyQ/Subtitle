@@ -3,6 +3,7 @@ import numpy as np
 from src.video_text.ppocr_temporal import (
     PPOCRTemporalConfig,
     build_ppocr_temporal_tracks,
+    canonicalize_ppocr_tracks,
 )
 from src.video_text.types import Candidate, FrameDetections
 
@@ -119,3 +120,25 @@ def test_stable_high_text_outside_dominant_subtitle_band_is_filtered():
     ])
     assert cy > 800
     assert metrics["ppocr_out_of_band_rejected_count"] == 1
+
+
+def test_canonicalize_tracks_removes_frame_to_frame_jitter():
+    frames = [
+        fd(0, high=[cand([190, 880, 530, 930])]),
+        fd(1, high=[cand([192, 881, 532, 931])]),
+        fd(2, high=[cand([189, 879, 529, 929])]),
+        fd(3, high=[cand([191, 880, 531, 930])]),
+    ]
+    tracks, _ = build_ppocr_temporal_tracks(
+        frames, 720, 1280, PPOCRTemporalConfig()
+    )
+
+    canonicalize_ppocr_tracks(tracks, pad=2)
+
+    boxes = [
+        tracks[0].observations[f].bbox
+        for f in tracks[0].sorted_frames()
+    ]
+    assert all(np.array_equal(boxes[0], box) for box in boxes[1:])
+    assert boxes[0][0] <= 187
+    assert boxes[0][2] >= 534

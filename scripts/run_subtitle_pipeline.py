@@ -37,7 +37,8 @@ def build_parser():
     p.add_argument("--temporal-mode",choices=["v4","v5","v5_5","v1"],default="v1")
     p.add_argument("--device",choices=["auto","cpu","cuda"],default="auto")
     p.add_argument("--precision",choices=["auto","fp32","fp16"],default="auto")
-    p.add_argument("--batch-size",type=int,default=16)
+    p.add_argument("--batch-size",type=int,default=32)
+    p.add_argument("--decode-prefetch-batches",type=int,default=4)
     p.add_argument("--cpu-threads",type=int,default=0)
     p.add_argument("--box-thickness",type=int,default=2)
     p.add_argument("--max-frames",type=int,default=0)
@@ -84,6 +85,7 @@ def main(argv=None):
         device=args.device,
         precision=args.precision,
         batch_size=args.batch_size,
+        decode_prefetch_batches=args.decode_prefetch_batches,
         cpu_threads=args.cpu_threads,
         box_thickness=args.box_thickness,
     )

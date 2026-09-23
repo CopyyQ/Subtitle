@@ -680,3 +680,33 @@ def clamp_ppocr_multiline_seams(
         "ppocr_multiline_seam_adjustment_count": adjustments,
         "ppocr_multiline_overlap_frame_count": len(overlap_frames),
     }
+
+
+def canonicalize_ppocr_tracks(
+    tracks: list[SubtitleTrack],
+    pad: int = 2,
+):
+    changed = 0
+    pad = max(0, int(pad))
+    for track in tracks:
+        if not track.observations:
+            continue
+        boxes = [
+            obs.bbox
+            for obs in track.observations.values()
+            if not obs.reconstructed
+        ]
+        if not boxes:
+            boxes = [obs.bbox for obs in track.observations.values()]
+        canonical = _box_union(boxes)
+        canonical = canonical + np.array(
+            [-pad, -pad, pad, pad],
+            np.float32,
+        )
+        for obs in track.observations.values():
+            if not np.array_equal(obs.bbox, canonical):
+                changed += 1
+            obs.bbox = canonical.copy()
+    return {
+        "ppocr_canonicalized_observation_count": changed,
+    }

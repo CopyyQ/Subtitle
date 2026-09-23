@@ -60,7 +60,8 @@ def test_production_cli_defaults_to_detection_only_auto_runtime():
     args=build_parser().parse_args(["input.mp4"])
     assert args.device=="auto"
     assert args.precision=="auto"
-    assert args.batch_size==16
+    assert args.batch_size==32
+    assert args.decode_prefetch_batches==4
     assert args.cpu_threads==0
     assert args.box_thickness==2
     assert args.detector=="ppocrv5_mobile"

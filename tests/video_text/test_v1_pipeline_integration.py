@@ -62,7 +62,7 @@ def test_pipeline_v1_locks_static_line_geometry_across_lifecycle():
     src = WORK / "static_jitter.mp4"
     _make_video(src)
     out = WORK / "v1.mp4"
-    cfg = PipelineConfig(
+    cfg = PipelineConfig(detector="fast",
         temporal_mode="v1",
         validate_chinese=False,
         roi_bottom_fraction=.45,
@@ -98,7 +98,7 @@ def test_v1_detection_only_never_constructs_recognizer(monkeypatch):
     monkeypatch.setattr(
         pipeline_module, "EasyOCRChineseRecognizer", ForbiddenRecognizer
     )
-    cfg = PipelineConfig(
+    cfg = PipelineConfig(detector="fast",
         temporal_mode="v1",
         validate_chinese=False,
         roi_bottom_fraction=.45,
@@ -143,7 +143,7 @@ def test_v1_recognizer_only_validation_skips_detector_based_ocr_tightening(monke
         "tighten_v1_static_tracks_with_temporal_glyphs",
         glyph_tighten_without_ocr,
     )
-    cfg = PipelineConfig(
+    cfg = PipelineConfig(detector="fast",
         temporal_mode="v1",
         validate_chinese=True,
         roi_bottom_fraction=.45,
@@ -162,11 +162,11 @@ def test_v1_signature_differs_from_v55_for_same_source():
     src = WORK / "signature.mp4"
     _make_video(src, n=1)
     p55 = SubtitlePipeline(
-        PipelineConfig(temporal_mode="v5_5", validate_chinese=False),
+        PipelineConfig(detector="fast", temporal_mode="v5_5", validate_chinese=False),
         backend=JitterBackend(),
     )
     p56 = SubtitlePipeline(
-        PipelineConfig(temporal_mode="v1", validate_chinese=False),
+        PipelineConfig(detector="fast", temporal_mode="v1", validate_chinese=False),
         backend=JitterBackend(),
     )
     s55 = p55._signature(src, 1)

@@ -5,6 +5,8 @@ from pathlib import Path
 import copy
 import json
 import math
+import queue
+import threading
 import time
 
 import cv2
@@ -27,6 +29,13 @@ from .display_shape import (
 )
 from .fast_backend import FastBackend
 from .ppocrv5_backend import PPOCRv5MobileBackend
+from .ppocr_temporal import (
+    PPOCRTemporalConfig,
+    build_ppocr_temporal_tracks,
+    canonicalize_ppocr_tracks,
+    clamp_ppocr_multiline_seams,
+    recover_ppocr_short_lines,
+)
 from .io import mux_audio, transcode_video, write_coordinate_json
 from .io_probe import bottom_roi, probe_video
 from .lifecycle import reconstruct_tracks, split_tracks_on_geometry, suppress_reconstructed_overlaps
@@ -80,7 +89,8 @@ class PipelineConfig:
     temporal_mode: str="v1"
     device: str="auto"
     precision: str="auto"
-    batch_size: int=16
+    batch_size: int=32
+    decode_prefetch_batches: int=4
     cpu_threads: int=0
     box_thickness: int=2
 
@@ -111,6 +121,8 @@ class PipelineConfig:
             raise ValueError("precision must be auto, fp32, or fp16")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.decode_prefetch_batches < 0:
+            raise ValueError("decode_prefetch_batches must be non-negative")
         if self.cpu_threads < 0:
             raise ValueError("cpu_threads must be non-negative")
         if self.box_thickness <= 0:
@@ -200,14 +212,22 @@ class SubtitlePipeline:
 
     def _signature(self,source,target):
         st=source.stat()
+        detector_model=(
+            PPOCRv5MobileBackend.model_name
+            if self.config.detector=="ppocrv5_mobile"
+            else "FAST-B736"
+        )
         return {
             "source":str(source.resolve()),"size":st.st_size,"mtime_ns":st.st_mtime_ns,
             "target_frames":int(target),
             "roi_bottom_fraction":self.config.roi_bottom_fraction,
             "temporal_mode":self.config.temporal_mode,
+            "detector":self.config.detector,
+            "detector_model":detector_model,
             "high_score":self.config.high_score,"low_score":self.config.low_score,
+            "ppocr_thresh":self.config.ppocr_thresh,
+            "ppocr_box_thresh":self.config.ppocr_box_thresh,
             "high_min_area":self.config.high_min_area,"low_min_area":self.config.low_min_area,
-            "backend":type(self.backend).__name__ if self.backend is not None else "FastBackend",
         }
 
     def _cache_path(self,source,output):
@@ -249,47 +269,128 @@ class SubtitlePipeline:
         if self.backend is None:
             self.backend=self._default_backend()
             signature=self._signature(source,target)
-        cap=cv2.VideoCapture(str(source))
+
         y1,y2=bottom_roi(info.height,self.config.roi_bottom_fraction)
         frames=[]
-        processed=0
         batch_size=int(getattr(self.backend,"batch_size",16))
         detector_seconds=0.0
-        while processed<target:
-            originals=[]; rois=[]
-            for _ in range(min(batch_size,target-processed)):
-                ok,frame=cap.read()
-                if not ok:
-                    break
-                originals.append(frame)
-                rois.append(frame[y1:y2])
-            if not originals:
-                break
-            backend_device=torch.device(
-                getattr(self.backend,"device",resolve_device(self.config.device))
-            )
-            synchronize(backend_device)
+        backend_device=torch.device(
+            getattr(self.backend,"device",resolve_device(self.config.device))
+        )
+        paddle_backend=self.config.detector=="ppocrv5_mobile"
+
+        def detect_batch(frame_start,rois):
+            nonlocal detector_seconds
+            if not paddle_backend:
+                synchronize(backend_device)
             t=time.perf_counter()
             detected=self.backend.detect_batch(rois)
-            synchronize(backend_device)
+            if not paddle_backend:
+                synchronize(backend_device)
             batch_elapsed=time.perf_counter()-t
             detector_seconds+=batch_elapsed
-            if originals:
-                per_frame_ms=1000.0*batch_elapsed/len(originals)
-                self._detector_latency_samples_ms.extend(
-                    [per_frame_ms]*len(originals)
-                )
-            if len(detected)!=len(originals):
-                cap.release()
+            per_frame_ms=1000.0*batch_elapsed/max(len(rois),1)
+            self._detector_latency_samples_ms.extend([per_frame_ms]*len(rois))
+            if len(detected)!=len(rois):
                 raise RuntimeError("detector batch length mismatch")
-            for high,low in detected:
+            for offset,(high,low) in enumerate(detected):
                 absolute=[_offset(c,y1) for c in list(high)+list(low)]
-                grouped=group_candidates_to_lines(absolute)
+                if paddle_backend:
+                    grouped=absolute
+                else:
+                    grouped=group_candidates_to_lines(absolute)
                 gh=[c for c in grouped if c.level=="HIGH"]
                 gl=[c for c in grouped if c.level=="LOW"]
-                frames.append(FrameDetections(processed,processed/info.fps,gh,gl))
-                processed+=1
-        cap.release()
+                fi=frame_start+offset
+                frames.append(FrameDetections(fi,fi/info.fps,gh,gl))
+
+        use_prefetch=(
+            paddle_backend
+            and self.config.decode_prefetch_batches>0
+            and target>batch_size
+        )
+        if use_prefetch:
+            batches=queue.Queue(maxsize=self.config.decode_prefetch_batches)
+            stop=threading.Event()
+            producer_errors=[]
+            sentinel=object()
+
+            def put_item(item):
+                while not stop.is_set():
+                    try:
+                        batches.put(item,timeout=.1)
+                        return True
+                    except queue.Full:
+                        continue
+                return False
+
+            def producer():
+                cap=cv2.VideoCapture(str(source))
+                decoded=0
+                try:
+                    while decoded<target and not stop.is_set():
+                        rois=[]
+                        start_index=decoded
+                        for _ in range(min(batch_size,target-decoded)):
+                            ok,frame=cap.read()
+                            if not ok:
+                                break
+                            rois.append(frame[y1:y2].copy())
+                            decoded+=1
+                        if not rois:
+                            break
+                        if not put_item((start_index,rois)):
+                            break
+                    if decoded!=target and not stop.is_set():
+                        producer_errors.append(
+                            RuntimeError(f"decoded {decoded} of {target} requested frames")
+                        )
+                except Exception as exc:
+                    producer_errors.append(exc)
+                finally:
+                    cap.release()
+                    put_item(sentinel)
+
+            thread=threading.Thread(
+                target=producer,
+                name="subtitle-roi-prefetch",
+                daemon=True,
+            )
+            thread.start()
+            try:
+                while True:
+                    item=batches.get()
+                    if item is sentinel:
+                        break
+                    frame_start,rois=item
+                    detect_batch(frame_start,rois)
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            if producer_errors:
+                raise producer_errors[0]
+        else:
+            cap=cv2.VideoCapture(str(source))
+            processed=0
+            try:
+                while processed<target:
+                    rois=[]
+                    frame_start=processed
+                    for _ in range(min(batch_size,target-processed)):
+                        ok,frame=cap.read()
+                        if not ok:
+                            break
+                        rois.append(frame[y1:y2].copy())
+                        processed+=1
+                    if not rois:
+                        break
+                    detect_batch(frame_start,rois)
+            finally:
+                cap.release()
+            if processed!=target:
+                raise RuntimeError(f"decoded {processed} of {target} requested frames")
+
+        frames.sort(key=lambda f:f.frame_index)
         if len(frames)!=target:
             raise RuntimeError(f"decoded {len(frames)} of {target} requested frames")
         self._save_cache(cache_path,signature,frames)
@@ -403,7 +504,7 @@ class SubtitlePipeline:
             if not ok:
                 writer.release(); cap.release()
                 raise RuntimeError(f"source ended at frame {fi}")
-            if self.config.temporal_mode in {"v5_5","v1"}:
+            if self.config.detector=="ppocrv5_mobile" or self.config.temporal_mode in {"v5_5","v1"}:
                 draw_line_rectangles(
                     frame,
                     by_frame.get(fi,[]),
@@ -757,6 +858,86 @@ class SubtitlePipeline:
             "identity":identity,
         }
 
+    def _process_ppocr(self,source,frames,info,target):
+        cfg=PPOCRTemporalConfig(
+            max_internal_gap=self.config.max_internal_gap,
+        )
+        strong_tracks,temporal_metrics=build_ppocr_temporal_tracks(
+            frames,
+            frame_width=info.width,
+            frame_height=info.height,
+            config=cfg,
+        )
+        used_low_count=sum(
+            1
+            for track in strong_tracks
+            for obs in track.observations.values()
+            if obs.level=="LOW"
+        )
+        raw_med,raw_p95=_corner_motion(strong_tracks)
+
+        weak_tracks,weak_metrics=recover_ppocr_short_lines(
+            source,
+            strong_tracks,
+            frames,
+            frame_width=info.width,
+            frame_height=info.height,
+            config=cfg,
+        )
+
+        canonical_metrics=canonicalize_ppocr_tracks(
+            strong_tracks,
+            pad=2,
+        )
+        tracks=strong_tracks+weak_tracks
+        seam_metrics=clamp_ppocr_multiline_seams(
+            tracks,
+            min_gap=1,
+        )
+
+        for track in strong_tracks:
+            for obs in track.observations.values():
+                if obs.level=="HIGH":
+                    obs.level="PP_HIGH"
+                elif obs.level=="LOW":
+                    obs.level="PP_LOW_BACKFILL"
+
+        stab_med,stab_p95=_corner_motion(tracks)
+        mode_metrics={
+            **temporal_metrics,
+            **weak_metrics,
+            **canonical_metrics,
+            **seam_metrics,
+            "ppocr_used_low_count":used_low_count,
+            "multiline_overlap_frame_count":seam_metrics[
+                "ppocr_multiline_overlap_frame_count"
+            ],
+            "stabilized_edge_motion_median_px":stab_med,
+            "stabilized_edge_motion_p95_px":stab_p95,
+        }
+        return {
+            "split_output_count":sum(
+                len(frame.high)+len(frame.low)
+                for frame in frames
+            ),
+            "provisional":strong_tracks,
+            "raw_med":raw_med,
+            "raw_p95":raw_p95,
+            "events":[],
+            "suppressed_reconstructed_overlap_count":0,
+            "horizontal_recovery_expanded_count":0,
+            "language_counts":{
+                "validated_chinese":0,
+                "rejected_non_chinese":0,
+                "retained_uncertain":0,
+            },
+            "mode_metrics":mode_metrics,
+            "stab_med":stab_med,
+            "stab_p95":stab_p95,
+            "tracks":tracks,
+            "identity":{},
+        }
+
     def run(self,input_path,output_path,max_frames=0,coordinate_json=None):
         start=time.perf_counter()
         source=Path(input_path).resolve()
@@ -781,7 +962,27 @@ class SubtitlePipeline:
         v5_metrics={}
         identity={}
 
-        if self.config.temporal_mode in {"v5_5","v1"}:
+        if self.config.detector=="ppocrv5_mobile":
+            state=self._process_ppocr(source,frames,info,target)
+            split_output_count=state["split_output_count"]
+            provisional=state["provisional"]
+            raw_med=state["raw_med"]
+            raw_p95=state["raw_p95"]
+            events=state["events"]
+            suppressed_reconstructed_overlap_count=state[
+                "suppressed_reconstructed_overlap_count"
+            ]
+            horizontal_recovery_expanded_count=state[
+                "horizontal_recovery_expanded_count"
+            ]
+            language_counts=state["language_counts"]
+            v5_metrics=state["mode_metrics"]
+            stab_med=state["stab_med"]
+            stab_p95=state["stab_p95"]
+            tracks=state["tracks"]
+            identity=state["identity"]
+
+        elif self.config.temporal_mode in {"v5_5","v1"}:
             state=self._process_v55(source,frames,info,target)
             split_output_count=state["split_output_count"]
             provisional=state["provisional"]
@@ -980,7 +1181,7 @@ class SubtitlePipeline:
         records=self._records(tracks,identity=identity)
         for r in records:
             r["timestamp"]=r["frame"]/info.fps
-        if self.config.temporal_mode in {"v5_5","v1"}:
+        if self.config.detector=="ppocrv5_mobile" or self.config.temporal_mode in {"v5_5","v1"}:
             display_shapes=build_line_shape_records(records,info.fps)
         else:
             display_shapes=build_display_shape_records(records,info.fps)
@@ -997,7 +1198,11 @@ class SubtitlePipeline:
                 export_event_contact_sheet(source,event,review_dir,self.config.roi_bottom_fraction,context=2)
 
         gaps=[e for e in events if e.event_type=="internal_miss_recovered"]
-        used_low=sum(1 for t in provisional for o in t.observations.values() if o.level=="LOW")
+        used_low=(
+            int(v5_metrics.get("ppocr_used_low_count",0))
+            if self.config.detector=="ppocrv5_mobile"
+            else sum(1 for t in provisional for o in t.observations.values() if o.level=="LOW")
+        )
         total_low=sum(len(f.low) for f in frames)
         actual_device=torch.device(
             getattr(self.backend,"device",run_device)
@@ -1019,11 +1224,21 @@ class SubtitlePipeline:
             getattr(self,"_detector_latency_samples_ms",[])
         )
         source_duration_seconds=target/max(info.fps,1e-9)
+        detector_name=(
+            getattr(self.backend,"model_name",None)
+            or ("PP-OCRv5_mobile_det" if self.config.detector=="ppocrv5_mobile" else "FAST-B736")
+        )
         metrics={
             "frames":target,"source_fps":info.fps,"width":info.width,"height":info.height,
             "source_codec":info.fourcc,
             "source_duration_seconds":source_duration_seconds,
+            "detector_name":detector_name,
+            "detector":self.config.detector,
             "roi_bottom_fraction":self.config.roi_bottom_fraction,
+            "high_score":self.config.high_score,
+            "low_score":self.config.low_score,
+            "ppocr_thresh":self.config.ppocr_thresh,
+            "ppocr_box_thresh":self.config.ppocr_box_thresh,
             "temporal_mode":self.config.temporal_mode,
             "device":actual_device.type,
             "precision":actual_precision,
@@ -1078,7 +1293,9 @@ class SubtitlePipeline:
         metrics["dropped_frame_count"]=0
         root=Path(__file__).resolve().parents[2]
         _,checkpoint=_default_fast_paths(root)
-        metrics["environment"]=collect_environment_metadata(root,checkpoint)
+        metrics["environment"]=collect_environment_metadata(
+            root,checkpoint,detector_name=detector_name
+        )
 
         coordinate_path=Path(coordinate_json).resolve() if coordinate_json else output.with_suffix(".json")
         metadata={"input":str(source),"output":str(output),**metrics}

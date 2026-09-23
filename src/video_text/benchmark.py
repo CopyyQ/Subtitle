@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import os
 import platform
 from pathlib import Path
@@ -51,7 +52,22 @@ def _total_ram_bytes():
         return None
 
 
-def collect_environment_metadata(project_root: Path, checkpoint: Path) -> dict:
+def _distribution_version(*names):
+    for name in names:
+        try:
+            return importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        except Exception:
+            return None
+    return None
+
+
+def collect_environment_metadata(
+    project_root: Path,
+    checkpoint: Path,
+    detector_name: str | None = None,
+) -> dict:
     root=Path(project_root)
     checkpoint=Path(checkpoint)
     try:
@@ -68,6 +84,9 @@ def collect_environment_metadata(project_root: Path, checkpoint: Path) -> dict:
         "os":platform.system(),
         "python_version":sys.version.split()[0],
         "torch_version":str(torch.__version__),
+        "paddle_version":_distribution_version("paddlepaddle-gpu","paddlepaddle"),
+        "paddleocr_version":_distribution_version("paddleocr"),
+        "detector_name":detector_name,
         "opencv_version":str(cv2.__version__),
         "cuda_version":torch.version.cuda,
         "cuda_available":cuda_available,

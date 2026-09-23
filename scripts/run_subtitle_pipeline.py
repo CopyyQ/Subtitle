@@ -28,6 +28,8 @@ def build_parser():
     p.add_argument("--low-score",type=float,default=.50)
     p.add_argument("--ppocr-thresh",type=float,default=.30)
     p.add_argument("--ppocr-box-thresh",type=float,default=.50)
+    p.add_argument("--ppocr-cpu-engine",choices=["auto","openvino","onnxruntime","paddle"],default="auto")
+    p.add_argument("--ppocr-openvino-model")
     p.add_argument("--high-min-area",type=int,default=250)
     p.add_argument("--low-min-area",type=int,default=30)
     p.add_argument("--max-internal-gap",type=int,choices=[1,2],default=2)
@@ -74,6 +76,8 @@ def main(argv=None):
         detector=args.detector,
         high_score=args.high_score,low_score=args.low_score,
         ppocr_thresh=args.ppocr_thresh,ppocr_box_thresh=args.ppocr_box_thresh,
+        ppocr_cpu_engine=args.ppocr_cpu_engine,
+        ppocr_openvino_model=args.ppocr_openvino_model,
         high_min_area=args.high_min_area,low_min_area=args.low_min_area,
         max_internal_gap=args.max_internal_gap,
         smoothing_window=args.smoothing_window,

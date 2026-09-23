@@ -69,6 +69,8 @@ def test_production_cli_defaults_to_detection_only_auto_runtime():
     assert args.low_score==.50
     assert args.ppocr_thresh==.30
     assert args.ppocr_box_thresh==.50
+    assert args.ppocr_cpu_engine=="auto"
+    assert args.ppocr_openvino_model is None
     assert args.validate_chinese is False
 
 

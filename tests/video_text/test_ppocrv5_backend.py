@@ -165,3 +165,47 @@ def test_cpu_backend_prefers_onnxruntime_when_available(monkeypatch):
 
     assert captured["engine"] == "onnxruntime"
     assert "enable_mkldnn" not in captured
+
+
+def test_cpu_backend_uses_explicit_openvino_ir(monkeypatch, tmp_path):
+    import src.video_text.ppocrv5_backend as backend_module
+
+    model = tmp_path / "model.xml"
+    model.write_text("<xml/>")
+    captured = {}
+
+    class FakeOpenVINOPredictor:
+        def __init__(self, model_path, **kwargs):
+            captured["model_path"] = str(model_path)
+            captured.update(kwargs)
+
+        def predict(self, images):
+            return []
+
+    monkeypatch.setattr(
+        backend_module,
+        "OpenVINOTextDetectionPredictor",
+        FakeOpenVINOPredictor,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        backend_module,
+        "_openvino_available",
+        lambda: True,
+        raising=False,
+    )
+
+    backend = PPOCRv5MobileBackend(
+        device="cpu",
+        cpu_engine="openvino",
+        openvino_model=model,
+        cpu_threads=6,
+        predictor=None,
+    )
+
+    assert backend.cpu_engine == "openvino"
+    assert captured["model_path"] == str(model)
+    assert captured["cpu_threads"] == 6
+    assert captured["async_inference"] is True
+    assert captured["thresh"] == .30
+    assert captured["box_thresh"] == .50

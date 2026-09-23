@@ -77,6 +77,8 @@ class PipelineConfig:
     low_score: float=.50
     ppocr_thresh: float=.30
     ppocr_box_thresh: float=.50
+    ppocr_cpu_engine: str="auto"
+    ppocr_openvino_model: str | None=None
     high_min_area: int=250
     low_min_area: int=30
     max_internal_gap: int=2
@@ -105,6 +107,8 @@ class PipelineConfig:
             raise ValueError("ppocr_thresh must be within 0..1")
         if not 0.0 <= self.ppocr_box_thresh <= 1.0:
             raise ValueError("ppocr_box_thresh must be within 0..1")
+        if self.ppocr_cpu_engine not in {"auto","openvino","onnxruntime","paddle"}:
+            raise ValueError("ppocr_cpu_engine must be auto, openvino, onnxruntime, or paddle")
         if self.output_codec not in {"h264","h265"}:
             raise ValueError("output_codec must be h264 or h265")
         if self.max_internal_gap not in {1,2}:
@@ -194,6 +198,8 @@ class SubtitlePipeline:
                 thresh=self.config.ppocr_thresh,
                 box_thresh=self.config.ppocr_box_thresh,
                 cpu_threads=self.config.cpu_threads,
+                cpu_engine=self.config.ppocr_cpu_engine,
+                openvino_model=self.config.ppocr_openvino_model,
             )
 
         root=Path(__file__).resolve().parents[2]
@@ -228,6 +234,8 @@ class SubtitlePipeline:
             "high_score":self.config.high_score,"low_score":self.config.low_score,
             "ppocr_thresh":self.config.ppocr_thresh,
             "ppocr_box_thresh":self.config.ppocr_box_thresh,
+            "ppocr_cpu_engine":self.config.ppocr_cpu_engine,
+            "ppocr_openvino_model":self.config.ppocr_openvino_model,
             "high_min_area":self.config.high_min_area,"low_min_area":self.config.low_min_area,
         }
 
@@ -1238,6 +1246,8 @@ class SubtitlePipeline:
             "low_score":self.config.low_score,
             "ppocr_thresh":self.config.ppocr_thresh,
             "ppocr_box_thresh":self.config.ppocr_box_thresh,
+            "ppocr_cpu_engine":getattr(self.backend,"cpu_engine",None) or self.config.ppocr_cpu_engine,
+            "ppocr_openvino_model":self.config.ppocr_openvino_model,
             "temporal_mode":self.config.temporal_mode,
             "device":actual_device.type,
             "precision":actual_precision,

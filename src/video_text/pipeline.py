@@ -67,11 +67,16 @@ class PipelineConfig:
     max_internal_gap: int=2
     smoothing_window: int=5
     output_codec: str="h264"
-    validate_chinese: bool=True
+    validate_chinese: bool=False
     export_srt: bool=False
     outline_pad_ratio: float=.08
     min_outline_pad: int=3
     temporal_mode: str="v1"
+    device: str="auto"
+    precision: str="auto"
+    batch_size: int=16
+    cpu_threads: int=0
+    box_thickness: int=2
 
     def __post_init__(self):
         if not .25 <= self.roi_bottom_fraction <= .45:
@@ -86,6 +91,16 @@ class PipelineConfig:
             raise ValueError("outline padding must be non-negative")
         if self.temporal_mode not in {"v4","v5","v5_5","v1"}:
             raise ValueError("temporal_mode must be v4, v5, v5_5, or v1")
+        if self.device not in {"auto","cpu","cuda"}:
+            raise ValueError("device must be auto, cpu, or cuda")
+        if self.precision not in {"auto","fp32","fp16"}:
+            raise ValueError("precision must be auto, fp32, or fp16")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if self.cpu_threads < 0:
+            raise ValueError("cpu_threads must be non-negative")
+        if self.box_thickness <= 0:
+            raise ValueError("box_thickness must be positive")
 
 
 @dataclass(slots=True)

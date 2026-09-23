@@ -32,9 +32,14 @@ def build_parser():
     p.add_argument("--outline-pad-ratio",type=float,default=.08)
     p.add_argument("--min-outline-pad",type=int,default=3)
     p.add_argument("--temporal-mode",choices=["v4","v5","v5_5","v1"],default="v1")
+    p.add_argument("--device",choices=["auto","cpu","cuda"],default="auto")
+    p.add_argument("--precision",choices=["auto","fp32","fp16"],default="auto")
+    p.add_argument("--batch-size",type=int,default=16)
+    p.add_argument("--cpu-threads",type=int,default=0)
+    p.add_argument("--box-thickness",type=int,default=2)
     p.add_argument("--max-frames",type=int,default=0)
     p.add_argument("--export-coordinates")
-    p.add_argument("--validate-chinese",dest="validate_chinese",action="store_true",default=True)
+    p.add_argument("--validate-chinese",dest="validate_chinese",action="store_true",default=False)
     p.add_argument("--no-validate-chinese",dest="validate_chinese",action="store_false")
     p.add_argument("--recognize-text",action="store_true")
     p.add_argument("--export-srt")
@@ -71,6 +76,11 @@ def main(argv=None):
         outline_pad_ratio=args.outline_pad_ratio,
         min_outline_pad=args.min_outline_pad,
         temporal_mode=args.temporal_mode,
+        device=args.device,
+        precision=args.precision,
+        batch_size=args.batch_size,
+        cpu_threads=args.cpu_threads,
+        box_thickness=args.box_thickness,
     )
     result=SubtitlePipeline(cfg).run(
         args.input,args.output,max_frames=args.max_frames,

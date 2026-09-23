@@ -3,6 +3,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+from scripts.run_subtitle_pipeline import build_parser
+from src.video_text.pipeline import PipelineConfig
+
 ROOT=Path(__file__).resolve().parents[2]
 SCRIPT=ROOT/"scripts/run_subtitle_pipeline.py"
 VIDEO=ROOT/"AI Engineer test.mp4"
@@ -51,3 +54,43 @@ def test_cli_accepts_v1_temporal_mode_in_dry_probe():
         pytest.skip("private evaluation video is not included in the Git repository")
     p=run(VIDEO,"--dry-probe","--temporal-mode","v1")
     assert p.returncode==0
+
+
+def test_production_cli_defaults_to_detection_only_auto_runtime():
+    args=build_parser().parse_args(["input.mp4"])
+    assert args.device=="auto"
+    assert args.precision=="auto"
+    assert args.batch_size==16
+    assert args.cpu_threads==0
+    assert args.box_thickness==2
+    assert args.validate_chinese is False
+
+
+@pytest.mark.parametrize("device",["auto","cpu","cuda"])
+def test_cli_accepts_device_choices(device):
+    args=build_parser().parse_args(["input.mp4","--device",device])
+    assert args.device==device
+
+
+@pytest.mark.parametrize("precision",["auto","fp32","fp16"])
+def test_cli_accepts_precision_choices(precision):
+    args=build_parser().parse_args(["input.mp4","--precision",precision])
+    assert args.precision==precision
+
+
+def test_validate_chinese_is_explicit_opt_in():
+    args=build_parser().parse_args(["input.mp4","--validate-chinese"])
+    assert args.validate_chinese is True
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"batch_size":0},"batch_size"),
+        ({"cpu_threads":-1},"cpu_threads"),
+        ({"box_thickness":0},"box_thickness"),
+    ],
+)
+def test_pipeline_config_rejects_invalid_runtime_values(kwargs,match):
+    with pytest.raises(ValueError,match=match):
+        PipelineConfig(**kwargs)

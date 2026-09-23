@@ -90,6 +90,7 @@ class PipelineConfig:
     max_internal_gap: int=2
     smoothing_window: int=5
     output_codec: str="h264"
+    output_preset: str="veryfast"
     validate_chinese: bool=False
     export_srt: bool=False
     outline_pad_ratio: float=.08
@@ -125,6 +126,8 @@ class PipelineConfig:
             raise ValueError("ppocr_gate_bright_net_threshold must be within 0..1")
         if self.output_codec not in {"h264","h265"}:
             raise ValueError("output_codec must be h264 or h265")
+        if self.output_preset not in {"ultrafast","superfast","veryfast","faster","fast","medium"}:
+            raise ValueError("output_preset must be a supported x264/x265 preset")
         if self.max_internal_gap not in {1,2}:
             raise ValueError("max_internal_gap must be 1 or 2")
         if self.smoothing_window<1 or self.smoothing_window%2==0:
@@ -563,6 +566,7 @@ class SubtitlePipeline:
             output_path=output,
             fps=info.fps,
             codec=self.config.output_codec,
+            preset=self.config.output_preset,
         )
 
     def _process_v55(self,source,frames,info,target):
@@ -1266,6 +1270,8 @@ class SubtitlePipeline:
         metrics={
             "frames":target,"source_fps":info.fps,"width":info.width,"height":info.height,
             "source_codec":info.fourcc,
+            "output_codec":self.config.output_codec,
+            "output_preset":self.config.output_preset,
             "source_duration_seconds":source_duration_seconds,
             "detector_name":detector_name,
             "detector":self.config.detector,

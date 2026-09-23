@@ -77,6 +77,7 @@ def test_production_cli_defaults_to_detection_only_auto_runtime():
     assert args.ppocr_gate_max_skip_frames==2
     assert args.ppocr_gate_change_threshold==.02
     assert args.ppocr_gate_bright_net_threshold==.0075
+    assert args.encode_preset=="veryfast"
     assert args.validate_chinese is False
 
 

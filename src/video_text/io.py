@@ -38,6 +38,7 @@ def build_rawvideo_mux_command(
     height,
     fps,
     codec="h264",
+    preset="veryfast",
 ):
     enc=ffmpeg_video_codec(codec)
     cmd=[
@@ -58,7 +59,7 @@ def build_rawvideo_mux_command(
         cmd += ["-profile:v","high"]
     cmd += [
         "-pix_fmt","yuv420p",
-        "-preset","veryfast",
+        "-preset",str(preset),
         "-crf","18",
         "-movflags","+faststart",
         "-c:a","copy",
@@ -74,6 +75,7 @@ def encode_raw_frames_with_audio(
     output_path,
     fps,
     codec="h264",
+    preset="veryfast",
 ):
     output=Path(output_path)
     output.parent.mkdir(parents=True,exist_ok=True)
@@ -90,6 +92,7 @@ def encode_raw_frames_with_audio(
         height=h,
         fps=fps,
         codec=codec,
+        preset=preset,
     )
     proc=subprocess.Popen(
         cmd,

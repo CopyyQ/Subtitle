@@ -193,6 +193,7 @@ class SubtitlePipeline:
                 low_score=self.config.low_score,
                 thresh=self.config.ppocr_thresh,
                 box_thresh=self.config.ppocr_box_thresh,
+                cpu_threads=self.config.cpu_threads,
             )
 
         root=Path(__file__).resolve().parents[2]

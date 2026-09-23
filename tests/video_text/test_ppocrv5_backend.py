@@ -88,3 +88,80 @@ def test_threshold_validation():
             device="cpu", high_score=.4, low_score=.5,
             predictor=FakePredictor([]),
         )
+
+
+def test_cpu_backend_disables_mkldnn_for_paddle_3_3_pir_compat(monkeypatch):
+    import sys
+    import types
+    import src.video_text.ppocrv5_backend as backend_module
+
+    captured = {}
+
+    class FakeTextDetection:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(TextDetection=FakeTextDetection),
+    )
+    monkeypatch.setattr(
+        backend_module,
+        "_onnxruntime_available",
+        lambda: False,
+    )
+
+    PPOCRv5MobileBackend(device="cpu", predictor=None)
+
+    assert captured["device"] == "cpu"
+    assert captured["enable_mkldnn"] is False
+
+
+def test_cpu_backend_forwards_explicit_cpu_threads(monkeypatch):
+    import sys
+    import types
+
+    captured = {}
+
+    class FakeTextDetection:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(TextDetection=FakeTextDetection),
+    )
+
+    PPOCRv5MobileBackend(device="cpu", cpu_threads=12, predictor=None)
+
+    assert captured["cpu_threads"] == 12
+
+
+def test_cpu_backend_prefers_onnxruntime_when_available(monkeypatch):
+    import sys
+    import types
+    import src.video_text.ppocrv5_backend as backend_module
+
+    captured = {}
+
+    class FakeTextDetection:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(TextDetection=FakeTextDetection),
+    )
+    monkeypatch.setattr(
+        backend_module,
+        "_onnxruntime_available",
+        lambda: True,
+    )
+
+    PPOCRv5MobileBackend(device="cpu", predictor=None)
+
+    assert captured["engine"] == "onnxruntime"
+    assert "enable_mkldnn" not in captured

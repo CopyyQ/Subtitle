@@ -304,3 +304,24 @@ def test_ppocr_gpu_detection_prefetches_without_torch_cuda_sync(monkeypatch):
     assert [f.frame_index for f in frames]==list(range(8))
     assert backend.calls==2
     assert sync_calls==[]
+
+
+def test_ppocr_default_backend_forwards_cpu_threads(monkeypatch):
+    import src.video_text.pipeline as pipeline_module
+
+    captured = {}
+
+    class DummyPPOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline_module, "PPOCRv5MobileBackend", DummyPPOCR)
+    monkeypatch.setattr(pipeline_module, "configure_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_module, "resolve_device", lambda requested: torch.device("cpu"))
+
+    pipe = SubtitlePipeline(
+        PipelineConfig(detector="ppocrv5_mobile", device="cpu", cpu_threads=12)
+    )
+    pipe._default_backend()
+
+    assert captured["cpu_threads"] == 12

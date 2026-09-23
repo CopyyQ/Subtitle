@@ -186,3 +186,83 @@ def test_static_request_shape_uses_single_image_from_preprocessed_batch():
     batch = np.zeros((32, 3, 576, 704), dtype=np.float32)
 
     assert static_request_shape(batch) == [1, 3, 576, 704]
+
+
+
+class CountingResize:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, imgs):
+        self.calls += 1
+        return list(imgs), [
+            np.array([img.shape[0], img.shape[1], 1.0, 1.0], dtype=np.float32)
+            for img in imgs
+        ]
+
+
+class CountingNormalize:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, imgs):
+        self.calls += 1
+        return [img.astype(np.float32) for img in imgs]
+
+
+def test_default_preprocessor_reuses_processor_instances_across_calls():
+    from src.video_text.openvino_backend import DefaultTextDetectionPreprocessor
+
+    resize = CountingResize()
+    normalize = CountingNormalize()
+    pre = DefaultTextDetectionPreprocessor(
+        resize_op=resize,
+        normalize_op=normalize,
+    )
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    pre([image])
+    pre([image])
+
+    assert resize.calls == 2
+    assert normalize.calls == 2
+    assert pre.resize_op is resize
+    assert pre.normalize_op is normalize
+
+
+def test_async_postprocess_starts_before_wait_all_returns():
+    import threading
+
+    postprocess_started = threading.Event()
+
+    class OverlapQueue(FakeAsyncQueue):
+        def wait_all(self):
+            for value, userdata in self.pending:
+                self.callback(FakeRequest(value), userdata)
+            assert postprocess_started.wait(timeout=1.0)
+            self.pending.clear()
+
+    def postprocess(pred, shapes, thresh, box_thresh):
+        postprocess_started.set()
+        return (
+            [np.array([[[1, 2], [5, 2], [5, 6], [1, 6]]], dtype=np.int16)],
+            [[0.9]],
+        )
+
+    predictor = OpenVINOTextDetectionPredictor(
+        model_path=Path("model.xml"),
+        compiled_model=FakeCompiled(),
+        input_name="x",
+        output_name="prob",
+        preprocess_fn=fake_preprocess,
+        postprocess_fn=postprocess,
+        async_inference=True,
+        async_queue_factory=OverlapQueue,
+    )
+
+    rows = list(predictor.predict([
+        np.zeros((20, 30, 3), np.uint8),
+        np.zeros((20, 30, 3), np.uint8),
+    ]))
+
+    assert len(rows) == 2

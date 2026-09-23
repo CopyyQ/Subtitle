@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import queue
+import threading
 from typing import Callable, Iterable, Sequence
 
 import numpy as np
@@ -68,26 +69,36 @@ def static_request_shape(batch: np.ndarray) -> list[int]:
     return [1, *[int(x) for x in batch.shape[1:]]]
 
 
-def _default_preprocess(images: Sequence[np.ndarray]):
-    from paddlex.inference.models.text_detection.processors import (
-        DetResizeForTest,
-        NormalizeImage,
-    )
+class DefaultTextDetectionPreprocessor:
+    def __init__(self, *, resize_op=None, normalize_op=None):
+        if resize_op is None or normalize_op is None:
+            from paddlex.inference.models.text_detection.processors import (
+                DetResizeForTest,
+                NormalizeImage,
+            )
+        self.resize_op = resize_op or DetResizeForTest(
+            limit_side_len=960,
+            limit_type="max",
+        )
+        self.normalize_op = normalize_op or NormalizeImage(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+            scale=1.0 / 255.0,
+            order="hwc",
+        )
 
-    resize = DetResizeForTest(limit_side_len=960, limit_type="max")
-    normalize = NormalizeImage(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225],
-        scale=1.0 / 255.0,
-        order="hwc",
-    )
-    resized, shapes = resize(imgs=list(images))
-    normalized = normalize(imgs=resized)
-    chw = [
-        np.transpose(img, (2, 0, 1)).astype(np.float32, copy=False)
-        for img in normalized
-    ]
-    return np.stack(chw, axis=0), shapes
+    def __call__(self, images: Sequence[np.ndarray]):
+        resized, shapes = self.resize_op(imgs=list(images))
+        normalized = self.normalize_op(imgs=resized)
+        chw = [
+            np.transpose(img, (2, 0, 1)).astype(np.float32, copy=False)
+            for img in normalized
+        ]
+        return np.stack(chw, axis=0), shapes
+
+
+def _default_preprocess(images: Sequence[np.ndarray]):
+    return DefaultTextDetectionPreprocessor()(images)
 
 
 class _DefaultPostprocess:
@@ -142,7 +153,7 @@ class OpenVINOTextDetectionPredictor:
         self.cpu_threads = int(cpu_threads)
         self.performance_hint = str(performance_hint).upper()
         self.async_inference = bool(async_inference)
-        self.preprocess_fn = preprocess_fn or _default_preprocess
+        self.preprocess_fn = preprocess_fn or DefaultTextDetectionPreprocessor()
         self.postprocess_fn = postprocess_fn or _DefaultPostprocess(
             self.thresh, self.box_thresh
         )
@@ -278,18 +289,55 @@ class OpenVINOTextDetectionPredictor:
     def _predict_async(self, batch, shapes):
         request_shape = static_request_shape(batch)
         self._compile_async_for_shape(request_shape)
-        result_queue = queue.Queue()
 
-        for index, shape_meta in enumerate(shapes):
-            sample = batch[index:index + 1]
-            self._async_queue.start_async(
-                {self.input_name: sample},
-                userdata=(result_queue, index, shape_meta),
-            )
-        self._async_queue.wait_all()
+        raw_queue = queue.Queue()
+        sentinel = object()
+        rows = [None] * len(shapes)
+        errors = []
 
-        outputs = [result_queue.get() for _ in range(len(shapes))]
-        return self._rows_from_single_outputs(outputs)
+        def postprocess_worker():
+            while True:
+                item = raw_queue.get()
+                if item is sentinel:
+                    return
+                index, pred, shape_meta = item
+                try:
+                    polys, scores = self.postprocess_fn(
+                        pred,
+                        [shape_meta],
+                        self.thresh,
+                        self.box_thresh,
+                    )
+                    rows[index] = {
+                        "dt_polys": np.asarray(polys[0]),
+                        "dt_scores": np.asarray(scores[0]),
+                    }
+                except BaseException as exc:
+                    errors.append(exc)
+
+        worker = threading.Thread(
+            target=postprocess_worker,
+            name="openvino-db-postprocess",
+            daemon=True,
+        )
+        worker.start()
+        try:
+            for index, shape_meta in enumerate(shapes):
+                sample = batch[index:index + 1]
+                self._async_queue.start_async(
+                    {self.input_name: sample},
+                    userdata=(raw_queue, index, shape_meta),
+                )
+            self._async_queue.wait_all()
+        finally:
+            raw_queue.put(sentinel)
+            worker.join()
+
+        if errors:
+            raise errors[0]
+        if any(row is None for row in rows):
+            raise RuntimeError("OpenVINO async postprocess returned incomplete rows")
+        return rows
 
     def predict(self, images: Sequence[np.ndarray]) -> Iterable[dict]:
         if not images:

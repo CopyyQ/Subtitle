@@ -8,6 +8,11 @@ import numpy as np
 import torch
 
 from .openvino_backend import OpenVINOTextDetectionPredictor, resolve_cpu_engine
+from .onnxruntime_backend import (
+    ONNXRuntimeTextDetectionPredictor,
+    cuda_onnxruntime_available,
+    default_ppocrv5_onnx_model,
+)
 from .temporal_gate import AdaptiveSubtitleGate, TemporalGateConfig
 from .types import Candidate
 
@@ -73,6 +78,8 @@ class PPOCRv5MobileBackend:
         self.gate_change_threshold = float(gate_change_threshold)
         self.gate_bright_net_threshold = float(gate_bright_net_threshold)
         self.cpu_engine = None
+        self.gpu_engine = None
+        self.gpu_acceleration_error = None
         self.precision = "fp32"
         self._gate = (
             AdaptiveSubtitleGate(
@@ -154,15 +161,30 @@ class PPOCRv5MobileBackend:
                     **runtime_kwargs,
                 )
         elif predictor is None:
-            from paddleocr import TextDetection
+            onnx_model = default_ppocrv5_onnx_model()
+            if onnx_model is not None and cuda_onnxruntime_available():
+                try:
+                    predictor = ONNXRuntimeTextDetectionPredictor(
+                        onnx_model,
+                        thresh=self.thresh,
+                        box_thresh=self.box_thresh,
+                    )
+                    self.gpu_engine = "onnxruntime_cuda"
+                    self.precision = getattr(predictor, "precision", "fp32")
+                except Exception as exc:
+                    self.gpu_acceleration_error = f"{type(exc).__name__}: {exc}"
+                    predictor = None
+            if predictor is None:
+                from paddleocr import TextDetection
 
-            predictor = TextDetection(
-                model_name=self.model_name,
-                device="gpu:0",
-                enable_hpi=False,
-                thresh=self.thresh,
-                box_thresh=self.box_thresh,
-            )
+                predictor = TextDetection(
+                    model_name=self.model_name,
+                    device="gpu:0",
+                    enable_hpi=False,
+                    thresh=self.thresh,
+                    box_thresh=self.box_thresh,
+                )
+                self.gpu_engine = "paddle"
         self.predictor = predictor
 
     @staticmethod

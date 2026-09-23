@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+testpaths = ["tests/video_text"]
+pythonpath = ["."]
+addopts = "-ra"

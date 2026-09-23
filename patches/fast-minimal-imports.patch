@@ -1,0 +1,25 @@
+diff --git a/models/__init__.py b/models/__init__.py
+index 7bd95b6..8fbcb2c 100644
+--- a/models/__init__.py
++++ b/models/__init__.py
+@@ -1,6 +1,3 @@
+-from .pan import PAN
+ from .fast import FAST
+-from .psenet import PSENet
+ from .builder import build_model
+-
+-__all__ = ['PAN', 'PSENet', 'FAST']
++__all__ = ['FAST', 'build_model']
+diff --git a/models/head/__init__.py b/models/head/__init__.py
+index a2b9ca4..576a9f6 100644
+--- a/models/head/__init__.py
++++ b/models/head/__init__.py
+@@ -1,7 +1,3 @@
+-from .pa_head import PA_Head
+ from .fast_head import fast_head
+-from .psenet_head import PSENet_Head
+ from .builder import build_head
+-
+-__all__ = ['PA_Head', 'fast_head', 'PSENet_Head',
+-           'build_head']
++__all__ = ['fast_head', 'build_head']

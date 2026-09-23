@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.video_text_cache.json
+outputs/
+review/
+
+# Single production model, provisioned by scripts/setup_fast.sh
+model/FAST/
+!model/README.md
+
+.EasyOCR/
+
+# Test scratch directories
+tests/video_text/.tmp*/

@@ -31,6 +31,96 @@ def _run(cmd):
         raise CodecUnavailableError(p.stderr[-2000:] or "ffmpeg failed")
     return p
 
+def build_rawvideo_mux_command(
+    source_path,
+    output_path,
+    width,
+    height,
+    fps,
+    codec="h264",
+):
+    enc=ffmpeg_video_codec(codec)
+    cmd=[
+        _ffmpeg(),
+        "-y",
+        "-loglevel","error",
+        "-f","rawvideo",
+        "-pix_fmt","bgr24",
+        "-s",f"{int(width)}x{int(height)}",
+        "-r",f"{float(fps):.8f}",
+        "-i","pipe:0",
+        "-i",str(source_path),
+        "-map","0:v:0",
+        "-map","1:a?",
+        "-c:v",enc,
+    ]
+    if codec.lower()=="h264":
+        cmd += ["-profile:v","high"]
+    cmd += [
+        "-pix_fmt","yuv420p",
+        "-preset","veryfast",
+        "-crf","18",
+        "-movflags","+faststart",
+        "-c:a","copy",
+        "-shortest",
+        str(output_path),
+    ]
+    return cmd
+
+
+def encode_raw_frames_with_audio(
+    frames,
+    source_path,
+    output_path,
+    fps,
+    codec="h264",
+):
+    output=Path(output_path)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    it=iter(frames)
+    try:
+        first=next(it)
+    except StopIteration:
+        raise ValueError("frames must not be empty")
+    h,w=first.shape[:2]
+    cmd=build_rawvideo_mux_command(
+        source_path=source_path,
+        output_path=output,
+        width=w,
+        height=h,
+        fps=fps,
+        codec=codec,
+    )
+    proc=subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        proc.stdin.write(first.tobytes())
+        for frame in it:
+            if frame.shape[:2]!=(h,w):
+                raise ValueError("all frames must have identical dimensions")
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        stderr=proc.stderr.read()
+        stdout=proc.stdout.read()
+        rc=proc.wait()
+    except Exception:
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+        proc.kill()
+        proc.wait()
+        raise
+    if rc:
+        message=stderr.decode("utf-8","replace")[-2000:] if stderr else "ffmpeg failed"
+        raise CodecUnavailableError(message)
+    return output
+
 def encode_video(frames,output_path,fps,codec="h264"):
     output=Path(output_path)
     output.parent.mkdir(parents=True,exist_ok=True)

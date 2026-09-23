@@ -625,15 +625,21 @@ class SubtitlePipeline:
                 pad_px=2,
                 compact_candidates=v1_compact_candidates,
             )
+            geometry_recognizer=(
+                recognizer
+                if recognizer is not None
+                and getattr(recognizer,"supports_detection",True)
+                else None
+            )
             glyph_tighten_metrics=tighten_v1_static_tracks_with_temporal_glyphs(
                 source,
                 tracks,
                 identity,
-                recognizer,
+                geometry_recognizer,
                 sample_count=15,
                 safety_pad=4,
             )
-            if recognizer is not None:
+            if recognizer is not None and getattr(recognizer,"supports_detection",True):
                 ocr_tighten_metrics=tighten_v1_static_tracks_with_ocr(
                     source,
                     tracks,

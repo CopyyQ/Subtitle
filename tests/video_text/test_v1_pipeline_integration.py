@@ -110,6 +110,54 @@ def test_v1_detection_only_never_constructs_recognizer(monkeypatch):
     assert result.output_video.exists()
 
 
+def test_v1_recognizer_only_validation_skips_detector_based_ocr_tightening(monkeypatch):
+    import src.video_text.pipeline as pipeline_module
+
+    src = WORK / "recognizer_only.mp4"
+    _make_video(src, n=4)
+    out = WORK / "recognizer_only_out.mp4"
+
+    class RecognizerOnly:
+        supports_detection = False
+        def recognize(self, crop):
+            return "我们", .95
+
+    def forbidden_ocr_tighten(*args, **kwargs):
+        raise AssertionError("detector-based OCR tightening must be skipped")
+
+    def glyph_tighten_without_ocr(video_path, tracks, identity, recognizer, **kwargs):
+        assert recognizer is None
+        return {
+            "glyph_tightened_track_count":0,
+            "glyph_tightening_area_ratio_median":1.0,
+            "glyph_center_alignment_adjustment_count":0,
+        }
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "tighten_v1_static_tracks_with_ocr",
+        forbidden_ocr_tighten,
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "tighten_v1_static_tracks_with_temporal_glyphs",
+        glyph_tighten_without_ocr,
+    )
+    cfg = PipelineConfig(
+        temporal_mode="v1",
+        validate_chinese=True,
+        roi_bottom_fraction=.45,
+        output_codec="h264",
+    )
+    result = SubtitlePipeline(
+        cfg,
+        backend=JitterBackend(),
+        recognizer=RecognizerOnly(),
+    ).run(src, out, max_frames=4)
+    assert result.output_video.exists()
+    assert result.metrics["v1_ocr_tightened_track_count"] == 0
+
+
 def test_v1_signature_differs_from_v55_for_same_source():
     src = WORK / "signature.mp4"
     _make_video(src, n=1)

@@ -86,6 +86,50 @@ def test_static_two_line_tracks_become_fully_locked_and_non_overlapping():
     assert metrics["prelock_max_edge_range_px"] >= 4.0
 
 
+def test_static_lock_applies_pairwise_seams_when_three_line_fragments_have_no_global_common_frame():
+    from src.video_text.v55_geometry import line_overlap_area
+
+    src = WORK / "pairwise_seams.mp4"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (360, 240)
+    )
+    assert writer.isOpened()
+    for _ in range(10):
+        writer.write(np.full((240, 360, 3), 110, np.uint8))
+    writer.release()
+
+    middle = _track_at(701, 0, 9, [80, 120, 280, 180])
+    early_top = _track_at(702, 3, 4, [150, 105, 210, 130])
+    late_bottom = _track_at(703, 8, 9, [150, 170, 210, 205])
+    identity = {
+        702: (77, 0),
+        701: (77, 1),
+        703: (77, 2),
+    }
+
+    metrics = apply_v1_static_geometry_lock(
+        src,
+        [middle, early_top, late_bottom],
+        identity,
+        sample_count=5,
+        pad_px=2,
+    )
+
+    for fi in (3, 4):
+        assert line_overlap_area(
+            early_top.observations[fi].bbox,
+            middle.observations[fi].bbox,
+        ) == 0.0
+    for fi in (8, 9):
+        assert line_overlap_area(
+            middle.observations[fi].bbox,
+            late_bottom.observations[fi].bbox,
+        ) == 0.0
+    assert metrics["final_overlap_frame_count"] == 0
+    assert metrics["temporal_seam_adjustment_count"] >= 2
+
+
 def test_static_lock_keeps_short_wrapped_second_line_short():
     src = WORK / "short_second_line.mp4"
     _make_two_line_video(src)

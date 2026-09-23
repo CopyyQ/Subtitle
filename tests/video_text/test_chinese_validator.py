@@ -74,3 +74,34 @@ def test_weak_track_keeps_small_real_glyph_at_measured_confidence():
     r=FakeRecognizer([("哼",.077),("哼",.049),("哼",.048)])
     d=validate_weak_track(make_track(),frames(),r,max_samples=3)
     assert d.status=="validated_chinese"
+
+
+def test_easyocr_recognizer_uses_recognition_only_without_text_detector(monkeypatch):
+    import sys
+    import types
+    from src.video_text.chinese_validator import EasyOCRChineseRecognizer
+
+    calls={"init":None,"recognize":0,"readtext":0}
+
+    class FakeReader:
+        def __init__(self,*args,**kwargs):
+            calls["init"]=(args,kwargs)
+        def recognize(self,crop,**kwargs):
+            calls["recognize"]+=1
+            assert kwargs["decoder"]=="greedy"
+            assert kwargs["contrast_ths"]==0.0
+            return [([0,10,0,10],"我们",.93)]
+        def readtext(self,*args,**kwargs):
+            calls["readtext"]+=1
+            raise AssertionError("readtext would run the OCR detector")
+
+    monkeypatch.setitem(sys.modules,"easyocr",types.SimpleNamespace(Reader=FakeReader))
+    recognizer=EasyOCRChineseRecognizer(gpu=True)
+    text,conf=recognizer.recognize(np.zeros((24,80,3),np.uint8))
+
+    assert calls["init"][1]["detector"] is False
+    assert calls["init"][1]["recognizer"] is True
+    assert calls["recognize"]==1
+    assert calls["readtext"]==0
+    assert text=="我们"
+    assert conf==.93

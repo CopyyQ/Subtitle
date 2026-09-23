@@ -1493,12 +1493,22 @@ def apply_v1_static_geometry_lock(
                 frame_width=frame_width,
                 max_shift_px=4.0,
             )
-            seam_adjustments += _fixed_multiline_seam(
-                video_path,
-                ordered,
-                common,
-                sample_count=sample_count,
-            )
+            # Temporal fragments assigned to one logical subtitle do not
+            # necessarily coexist on the same frames. A global intersection
+            # can therefore be empty even though adjacent line pairs overlap
+            # for part of the lifecycle. Resolve seams pair-by-pair using
+            # only the frames where that pair actually coexists.
+            for top_track, bottom_track in zip(ordered, ordered[1:]):
+                pair_common = sorted(
+                    set(top_track.sorted_frames())
+                    & set(bottom_track.sorted_frames())
+                )
+                seam_adjustments += _fixed_multiline_seam(
+                    video_path,
+                    [top_track, bottom_track],
+                    pair_common,
+                    sample_count=sample_count,
+                )
 
         for fi in common:
             for a, b in zip(ordered, ordered[1:]):

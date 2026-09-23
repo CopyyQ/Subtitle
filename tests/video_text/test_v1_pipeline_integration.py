@@ -84,6 +84,32 @@ def test_pipeline_v1_locks_static_line_geometry_across_lifecycle():
     assert all(len(set(boxes)) == 1 for boxes in by_track.values())
 
 
+def test_v1_detection_only_never_constructs_recognizer(monkeypatch):
+    import src.video_text.pipeline as pipeline_module
+
+    src = WORK / "no_recognizer.mp4"
+    _make_video(src, n=4)
+    out = WORK / "no_recognizer_out.mp4"
+
+    class ForbiddenRecognizer:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("recognizer must not be constructed")
+
+    monkeypatch.setattr(
+        pipeline_module, "EasyOCRChineseRecognizer", ForbiddenRecognizer
+    )
+    cfg = PipelineConfig(
+        temporal_mode="v1",
+        validate_chinese=False,
+        roi_bottom_fraction=.45,
+        output_codec="h264",
+    )
+    result = SubtitlePipeline(cfg, backend=JitterBackend()).run(
+        src, out, max_frames=4
+    )
+    assert result.output_video.exists()
+
+
 def test_v1_signature_differs_from_v55_for_same_source():
     src = WORK / "signature.mp4"
     _make_video(src, n=1)

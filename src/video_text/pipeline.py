@@ -578,19 +578,18 @@ class SubtitlePipeline:
         v1_transition_metrics={}
         v1_compact_candidates={}
         if self.config.temporal_mode=="v1":
-            if recognizer is not None:
-                (
-                    tracks,
-                    identity,
-                    v1_compact_candidates,
-                    v1_merge_metrics,
-                )=merge_v1_same_content_tracks(
-                    source,
-                    tracks,
-                    identity,
-                    recognizer=recognizer,
-                    max_gap=1,
-                )
+            (
+                tracks,
+                identity,
+                v1_compact_candidates,
+                v1_merge_metrics,
+            )=merge_v1_same_content_tracks(
+                source,
+                tracks,
+                identity,
+                recognizer=recognizer,
+                max_gap=1,
+            )
             (
                 tracks,
                 identity,
@@ -618,31 +617,29 @@ class SubtitlePipeline:
                 pad_px=2,
                 compact_candidates=v1_compact_candidates,
             )
-            glyph_tighten_metrics=(
-                tighten_v1_static_tracks_with_temporal_glyphs(
-                    source,
-                    tracks,
-                    identity,
-                    recognizer,
-                    sample_count=15,
-                    safety_pad=4,
-                )
-                if recognizer is not None
-                else {
-                    "glyph_tightened_track_count":0,
-                    "glyph_tightening_area_ratio_median":1.0,
-                    "glyph_center_alignment_adjustment_count":0,
-                }
-            )
-            ocr_tighten_metrics=tighten_v1_static_tracks_with_ocr(
+            glyph_tighten_metrics=tighten_v1_static_tracks_with_temporal_glyphs(
                 source,
                 tracks,
                 identity,
                 recognizer,
-                min_height_px=58,
-                sample_count=3,
-                safety_pad=2,
+                sample_count=15,
+                safety_pad=4,
             )
+            if recognizer is not None:
+                ocr_tighten_metrics=tighten_v1_static_tracks_with_ocr(
+                    source,
+                    tracks,
+                    identity,
+                    recognizer,
+                    min_height_px=58,
+                    sample_count=3,
+                    safety_pad=2,
+                )
+            else:
+                ocr_tighten_metrics={
+                    "ocr_tightened_track_count":0,
+                    "ocr_tightening_area_ratio_median":1.0,
+                }
             height_regularize_metrics=regularize_v1_single_line_height(
                 tracks,
                 identity,

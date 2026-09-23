@@ -26,3 +26,6 @@ model/FAST/
 
 # Test scratch directories
 tests/video_text/.tmp*/
+
+# Local isolated worktrees
+.worktrees/

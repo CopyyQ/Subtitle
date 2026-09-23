@@ -36,7 +36,7 @@ from .ppocr_temporal import (
     clamp_ppocr_multiline_seams,
     recover_ppocr_short_lines,
 )
-from .io import mux_audio, transcode_video, write_coordinate_json
+from .io import encode_raw_frames_with_audio, write_coordinate_json
 from .io_probe import bottom_roi, probe_video
 from .lifecycle import reconstruct_tracks, split_tracks_on_geometry, suppress_reconstructed_overlaps
 from .line_grouping import group_candidates_to_lines
@@ -492,43 +492,41 @@ class SubtitlePipeline:
         by_frame={}
         for r in records:
             by_frame.setdefault(r["frame"],[]).append(r)
-        raw=output.with_name(output.stem+".silent_raw.mp4")
-        encoded=output.with_name(output.stem+".encoded.mp4")
-        cap=cv2.VideoCapture(str(source))
-        writer=cv2.VideoWriter(str(raw),cv2.VideoWriter_fourcc(*"mp4v"),info.fps,(info.width,info.height))
-        if not writer.isOpened():
-            cap.release()
-            raise RuntimeError(f"cannot create temporary output: {raw}")
-        for fi in range(target):
-            ok,frame=cap.read()
-            if not ok:
-                writer.release(); cap.release()
-                raise RuntimeError(f"source ended at frame {fi}")
-            if self.config.detector=="ppocrv5_mobile" or self.config.temporal_mode in {"v5_5","v1"}:
-                draw_line_rectangles(
-                    frame,
-                    by_frame.get(fi,[]),
-                    color=(0,255,0),
-                    thickness=self.config.box_thickness,
-                    line_type=cv2.LINE_AA,
-                )
-            else:
-                draw_display_polygons(
-                    frame,
-                    by_frame.get(fi,[]),
-                    color=(0,255,0),
-                    thickness=self.config.box_thickness,
-                    line_type=cv2.LINE_AA,
-                )
-            writer.write(frame)
-        writer.release(); cap.release()
-        try:
-            transcode_video(raw,encoded,self.config.output_codec)
-            mux_audio(encoded,source,output)
-        finally:
-            for p in (raw,encoded):
-                try: p.unlink()
-                except FileNotFoundError: pass
+
+        def rendered_frames():
+            cap=cv2.VideoCapture(str(source))
+            try:
+                for fi in range(target):
+                    ok,frame=cap.read()
+                    if not ok:
+                        raise RuntimeError(f"source ended at frame {fi}")
+                    if self.config.detector=="ppocrv5_mobile" or self.config.temporal_mode in {"v5_5","v1"}:
+                        draw_line_rectangles(
+                            frame,
+                            by_frame.get(fi,[]),
+                            color=(0,255,0),
+                            thickness=self.config.box_thickness,
+                            line_type=cv2.LINE_AA,
+                        )
+                    else:
+                        draw_display_polygons(
+                            frame,
+                            by_frame.get(fi,[]),
+                            color=(0,255,0),
+                            thickness=self.config.box_thickness,
+                            line_type=cv2.LINE_AA,
+                        )
+                    yield frame
+            finally:
+                cap.release()
+
+        encode_raw_frames_with_audio(
+            rendered_frames(),
+            source_path=source,
+            output_path=output,
+            fps=info.fps,
+            codec=self.config.output_codec,
+        )
 
     def _process_v55(self,source,frames,info,target):
         split_output_count=sum(len(f.high)+len(f.low) for f in frames)

@@ -79,6 +79,11 @@ class PipelineConfig:
     ppocr_box_thresh: float=.50
     ppocr_cpu_engine: str="auto"
     ppocr_openvino_model: str | None=None
+    ppocr_openvino_streams: int=0
+    ppocr_openvino_fuse_preprocess: bool=True
+    ppocr_adaptive_gating: bool=False
+    ppocr_gate_max_skip_frames: int=2
+    ppocr_gate_change_threshold: float=.02
     high_min_area: int=250
     low_min_area: int=30
     max_internal_gap: int=2
@@ -109,6 +114,12 @@ class PipelineConfig:
             raise ValueError("ppocr_box_thresh must be within 0..1")
         if self.ppocr_cpu_engine not in {"auto","openvino","onnxruntime","paddle"}:
             raise ValueError("ppocr_cpu_engine must be auto, openvino, onnxruntime, or paddle")
+        if self.ppocr_openvino_streams < 0:
+            raise ValueError("ppocr_openvino_streams must be non-negative")
+        if self.ppocr_gate_max_skip_frames < 0:
+            raise ValueError("ppocr_gate_max_skip_frames must be non-negative")
+        if not 0.0 <= self.ppocr_gate_change_threshold <= 1.0:
+            raise ValueError("ppocr_gate_change_threshold must be within 0..1")
         if self.output_codec not in {"h264","h265"}:
             raise ValueError("output_codec must be h264 or h265")
         if self.max_internal_gap not in {1,2}:
@@ -200,6 +211,11 @@ class SubtitlePipeline:
                 cpu_threads=self.config.cpu_threads,
                 cpu_engine=self.config.ppocr_cpu_engine,
                 openvino_model=self.config.ppocr_openvino_model,
+                openvino_num_streams=self.config.ppocr_openvino_streams,
+                openvino_fuse_preprocess=self.config.ppocr_openvino_fuse_preprocess,
+                adaptive_gating=self.config.ppocr_adaptive_gating,
+                gate_max_skip_frames=self.config.ppocr_gate_max_skip_frames,
+                gate_change_threshold=self.config.ppocr_gate_change_threshold,
             )
 
         root=Path(__file__).resolve().parents[2]
@@ -236,6 +252,11 @@ class SubtitlePipeline:
             "ppocr_box_thresh":self.config.ppocr_box_thresh,
             "ppocr_cpu_engine":self.config.ppocr_cpu_engine,
             "ppocr_openvino_model":self.config.ppocr_openvino_model,
+            "ppocr_openvino_streams":self.config.ppocr_openvino_streams,
+            "ppocr_openvino_fuse_preprocess":self.config.ppocr_openvino_fuse_preprocess,
+            "ppocr_adaptive_gating":self.config.ppocr_adaptive_gating,
+            "ppocr_gate_max_skip_frames":self.config.ppocr_gate_max_skip_frames,
+            "ppocr_gate_change_threshold":self.config.ppocr_gate_change_threshold,
             "high_min_area":self.config.high_min_area,"low_min_area":self.config.low_min_area,
         }
 
@@ -278,6 +299,8 @@ class SubtitlePipeline:
         if self.backend is None:
             self.backend=self._default_backend()
             signature=self._signature(source,target)
+        if hasattr(self.backend,"reset_temporal_gate"):
+            self.backend.reset_temporal_gate()
 
         y1,y2=bottom_roi(info.height,self.config.roi_bottom_fraction)
         frames=[]
@@ -1248,6 +1271,19 @@ class SubtitlePipeline:
             "ppocr_box_thresh":self.config.ppocr_box_thresh,
             "ppocr_cpu_engine":getattr(self.backend,"cpu_engine",None) or self.config.ppocr_cpu_engine,
             "ppocr_openvino_model":self.config.ppocr_openvino_model,
+            "ppocr_openvino_streams_requested":self.config.ppocr_openvino_streams,
+            "ppocr_openvino_streams_actual":getattr(getattr(self.backend,"predictor",None),"num_streams",None),
+            "ppocr_openvino_optimal_requests":getattr(getattr(self.backend,"predictor",None),"optimal_requests",None),
+            "ppocr_openvino_inference_threads":getattr(getattr(self.backend,"predictor",None),"inference_num_threads",None),
+            "ppocr_openvino_fuse_preprocess":self.config.ppocr_openvino_fuse_preprocess,
+            "ppocr_adaptive_gating":self.config.ppocr_adaptive_gating,
+            "ppocr_gate_total_frames":getattr(self.backend,"gate_total_frames",0),
+            "ppocr_gate_inferred_frames":getattr(self.backend,"gate_inferred_frames",target),
+            "ppocr_gate_skipped_frames":getattr(self.backend,"gate_skipped_frames",0),
+            "ppocr_gate_skip_ratio":(
+                getattr(self.backend,"gate_skipped_frames",0)
+                / max(getattr(self.backend,"gate_total_frames",target),1)
+            ),
             "temporal_mode":self.config.temporal_mode,
             "device":actual_device.type,
             "precision":actual_precision,

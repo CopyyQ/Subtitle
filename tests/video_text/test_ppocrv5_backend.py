@@ -209,3 +209,83 @@ def test_cpu_backend_uses_explicit_openvino_ir(monkeypatch, tmp_path):
     assert captured["async_inference"] is True
     assert captured["thresh"] == .30
     assert captured["box_thresh"] == .50
+
+
+
+def test_openvino_backend_forwards_streams_and_fused_preprocess(monkeypatch, tmp_path):
+    import src.video_text.ppocrv5_backend as backend_module
+
+    model = tmp_path / "model.xml"
+    model.write_text("<xml/>")
+    captured = {}
+
+    class FakeOpenVINOPredictor:
+        def __init__(self, model_path, **kwargs):
+            captured.update(kwargs)
+
+        def predict(self, images):
+            return []
+
+    monkeypatch.setattr(
+        backend_module,
+        "OpenVINOTextDetectionPredictor",
+        FakeOpenVINOPredictor,
+    )
+    monkeypatch.setattr(backend_module, "_openvino_available", lambda: True)
+
+    PPOCRv5MobileBackend(
+        device="cpu",
+        cpu_engine="openvino",
+        openvino_model=model,
+        openvino_num_streams=8,
+        openvino_fuse_preprocess=True,
+        predictor=None,
+    )
+
+    assert captured["num_streams"] == 8
+    assert captured["fuse_preprocess"] is True
+
+
+def test_adaptive_gate_reuses_stable_results_and_reduces_inference_count():
+    row = result([[[1, 2], [8, 2], [8, 9], [1, 9]]], [.95])
+    predictor = FakePredictor([row, row])
+    backend = PPOCRv5MobileBackend(
+        device="cpu",
+        predictor=predictor,
+        adaptive_gating=True,
+        gate_max_skip_frames=2,
+        gate_change_threshold=.02,
+    )
+    image = np.full((120, 200, 3), 20, dtype=np.uint8)
+
+    rows = backend.detect_batch([image, image.copy(), image.copy(), image.copy()])
+
+    assert len(rows) == 4
+    assert predictor.calls == [2]
+    assert all(len(high) == 1 for high, _ in rows)
+    assert backend.gate_total_frames == 4
+    assert backend.gate_inferred_frames == 2
+    assert backend.gate_skipped_frames == 2
+
+
+def test_adaptive_gate_detects_visual_change_immediately():
+    row_a = result([[[1, 2], [8, 2], [8, 9], [1, 9]]], [.95])
+    row_b = result([[[11, 12], [18, 12], [18, 19], [11, 19]]], [.96])
+    predictor = FakePredictor([row_a, row_b])
+    backend = PPOCRv5MobileBackend(
+        device="cpu",
+        predictor=predictor,
+        adaptive_gating=True,
+        gate_max_skip_frames=5,
+        gate_change_threshold=.02,
+    )
+    base = np.full((120, 200, 3), 20, dtype=np.uint8)
+    changed = base.copy()
+    changed[40:80, 60:140] = 240
+
+    rows = backend.detect_batch([base, changed, changed.copy()])
+
+    assert predictor.calls == [2]
+    assert rows[0][0][0].bbox.tolist() == [1, 2, 8, 9]
+    assert rows[1][0][0].bbox.tolist() == [11, 12, 18, 19]
+    assert rows[2][0][0].bbox.tolist() == [11, 12, 18, 19]

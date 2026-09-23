@@ -30,6 +30,12 @@ def build_parser():
     p.add_argument("--ppocr-box-thresh",type=float,default=.50)
     p.add_argument("--ppocr-cpu-engine",choices=["auto","openvino","onnxruntime","paddle"],default="auto")
     p.add_argument("--ppocr-openvino-model")
+    p.add_argument("--ppocr-openvino-streams",type=int,default=0)
+    p.add_argument("--ppocr-openvino-fuse-preprocess",dest="ppocr_openvino_fuse_preprocess",action="store_true",default=True)
+    p.add_argument("--no-ppocr-openvino-fuse-preprocess",dest="ppocr_openvino_fuse_preprocess",action="store_false")
+    p.add_argument("--ppocr-adaptive-gating",action="store_true",default=False)
+    p.add_argument("--ppocr-gate-max-skip-frames",type=int,default=2)
+    p.add_argument("--ppocr-gate-change-threshold",type=float,default=.02)
     p.add_argument("--high-min-area",type=int,default=250)
     p.add_argument("--low-min-area",type=int,default=30)
     p.add_argument("--max-internal-gap",type=int,choices=[1,2],default=2)
@@ -78,6 +84,11 @@ def main(argv=None):
         ppocr_thresh=args.ppocr_thresh,ppocr_box_thresh=args.ppocr_box_thresh,
         ppocr_cpu_engine=args.ppocr_cpu_engine,
         ppocr_openvino_model=args.ppocr_openvino_model,
+        ppocr_openvino_streams=args.ppocr_openvino_streams,
+        ppocr_openvino_fuse_preprocess=args.ppocr_openvino_fuse_preprocess,
+        ppocr_adaptive_gating=args.ppocr_adaptive_gating,
+        ppocr_gate_max_skip_frames=args.ppocr_gate_max_skip_frames,
+        ppocr_gate_change_threshold=args.ppocr_gate_change_threshold,
         high_min_area=args.high_min_area,low_min_area=args.low_min_area,
         max_internal_gap=args.max_internal_gap,
         smoothing_window=args.smoothing_window,

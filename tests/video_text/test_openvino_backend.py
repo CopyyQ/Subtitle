@@ -266,3 +266,131 @@ def test_async_postprocess_starts_before_wait_all_returns():
     ]))
 
     assert len(rows) == 2
+
+
+
+def test_openvino_config_accepts_explicit_stream_count_without_limiting_threads():
+    from src.video_text.openvino_backend import build_openvino_cpu_config
+
+    config = build_openvino_cpu_config(
+        cpu_threads=0,
+        performance_hint="THROUGHPUT",
+        num_streams=8,
+    )
+
+    assert config == {
+        "PERFORMANCE_HINT": "THROUGHPUT",
+        "NUM_STREAMS": 8,
+    }
+
+
+def test_fused_preprocess_spec_matches_ppocr_mobile_fixed_roi():
+    from src.video_text.openvino_backend import fused_preprocess_spec
+
+    spec = fused_preprocess_spec(
+        raw_height=576,
+        raw_width=720,
+        resized_height=576,
+        resized_width=704,
+    )
+
+    assert spec["tensor_shape"] == [1, 576, 704, 3]
+    assert spec["model_shape"] == [1, 3, 576, 704]
+    assert spec["tensor_layout"] == "NHWC"
+    assert spec["model_layout"] == "NCHW"
+    assert np.allclose(spec["mean"], [123.675, 116.28, 103.53])
+    assert np.allclose(spec["scale"], [58.395, 57.12, 57.375])
+
+
+def test_fused_input_keeps_exact_paddle_resize_but_skips_python_normalize():
+    from paddlex.inference.models.text_detection.processors import DetResizeForTest
+    from src.video_text.openvino_backend import prepare_fused_inputs
+
+    rng = np.random.default_rng(7)
+    images = [
+        rng.integers(0, 256, size=(576, 720, 3), dtype=np.uint8),
+        rng.integers(0, 256, size=(576, 720, 3), dtype=np.uint8),
+    ]
+
+    batch, shapes, resized_shape = prepare_fused_inputs(images)
+    expected, expected_shapes = DetResizeForTest(
+        limit_side_len=960,
+        limit_type="max",
+    )(imgs=images)
+
+    assert batch.shape == (2, 576, 704, 3)
+    assert batch.dtype == np.uint8
+    assert resized_shape == (576, 704)
+    assert np.array_equal(batch[0], expected[0])
+    assert np.array_equal(batch[1], expected[1])
+    assert np.allclose(shapes[0], expected_shapes[0])
+
+
+
+def test_fused_openvino_model_accepts_raw_uint8_nhwc():
+    import pytest
+
+    ov = pytest.importorskip("openvino")
+    ops = ov.opset13
+
+    from src.video_text.openvino_backend import build_fused_openvino_model
+
+    param = ops.parameter([1, 3, 4, 4], ov.Type.f32, name="x")
+    model = ov.Model([param], [param], "identity")
+
+    fused = build_fused_openvino_model(
+        model,
+        raw_height=8,
+        raw_width=8,
+        resized_height=4,
+        resized_width=4,
+        ov_module=ov,
+    )
+
+    assert list(fused.input(0).shape) == [1, 4, 4, 3]
+    assert fused.input(0).element_type == ov.Type.u8
+
+    compiled = ov.Core().compile_model(fused, "CPU")
+    raw = np.zeros((1, 4, 4, 3), dtype=np.uint8)
+    result = compiled({compiled.input(0): raw})[compiled.output(0)]
+
+    assert result.shape == (1, 3, 4, 4)
+
+
+
+def test_async_fused_predict_submits_raw_uint8_nhwc():
+    class RecordingQueue(FakeAsyncQueue):
+        last = None
+
+        def __init__(self, compiled_model):
+            super().__init__(compiled_model)
+            self.inputs = []
+            RecordingQueue.last = self
+
+        def start_async(self, inputs, userdata=None):
+            x = next(iter(inputs.values()))
+            self.inputs.append((tuple(x.shape), x.dtype))
+            super().start_async(inputs, userdata=userdata)
+
+    predictor = OpenVINOTextDetectionPredictor(
+        model_path=Path("model.xml"),
+        compiled_model=FakeCompiled(),
+        input_name="x",
+        output_name="prob",
+        preprocess_fn=fake_preprocess,
+        postprocess_fn=score_from_pred_postprocess,
+        async_inference=True,
+        fuse_preprocess=True,
+        async_queue_factory=RecordingQueue,
+    )
+
+    rows = list(predictor.predict([
+        np.zeros((64, 96, 3), np.uint8),
+        np.ones((64, 96, 3), np.uint8),
+    ]))
+
+    assert len(rows) == 2
+    assert RecordingQueue.last.inputs == [
+        ((1, 64, 96, 3), np.dtype("uint8")),
+        ((1, 64, 96, 3), np.dtype("uint8")),
+    ]

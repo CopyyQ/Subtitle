@@ -37,11 +37,17 @@ def _command(input_path,output,coords,args,batch,precision):
     parts=[
         sys.executable,str(ROOT/"scripts"/"run_subtitle_pipeline.py"),
         str(input_path),"--output",str(output),
+        "--detector",args.detector,
         "--device",args.device,"--precision",precision,
         "--batch-size",str(batch),
+        "--decode-prefetch-batches",str(args.decode_prefetch_batches),
         "--cpu-threads",str(args.cpu_threads),
         "--box-thickness",str(args.box_thickness),
         "--roi-bottom-fraction",str(args.roi_bottom_fraction),
+        "--ppocr-thresh",str(args.ppocr_thresh),
+        "--ppocr-box-thresh",str(args.ppocr_box_thresh),
+        "--high-score",str(args.high_score),
+        "--low-score",str(args.low_score),
         "--temporal-mode","v1",
         "--max-frames",str(args.max_frames),
         "--export-coordinates",str(coords),
@@ -51,18 +57,24 @@ def _command(input_path,output,coords,args,batch,precision):
 
 
 def run_variant(input_path,output_dir,args,batch,precision):
-    name=f"{args.device}_{precision}_b{batch}"
+    name=f"{args.detector}_{args.device}_{precision}_b{batch}"
     variant_dir=output_dir/name
     variant_dir.mkdir(parents=True,exist_ok=True)
     output=variant_dir/"boxed.mp4"
     coords=variant_dir/"coords.json"
     cfg=PipelineConfig(
+        detector=args.detector,
         temporal_mode="v1",
         validate_chinese=False,
         roi_bottom_fraction=args.roi_bottom_fraction,
         device=args.device,
         precision=precision,
         batch_size=batch,
+        decode_prefetch_batches=args.decode_prefetch_batches,
+        ppocr_thresh=args.ppocr_thresh,
+        ppocr_box_thresh=args.ppocr_box_thresh,
+        high_score=args.high_score,
+        low_score=args.low_score,
         cpu_threads=args.cpu_threads,
         box_thickness=args.box_thickness,
     )
@@ -109,15 +121,21 @@ def run_variant(input_path,output_dir,args,batch,precision):
 
 
 def build_parser():
-    p=argparse.ArgumentParser(description="Sweep FAST V1 runtime configurations")
+    p=argparse.ArgumentParser(description="Sweep subtitle detector runtime configurations")
     p.add_argument("input")
+    p.add_argument("--detector",choices=["ppocrv5_mobile","fast"],default="ppocrv5_mobile")
     p.add_argument("--device",choices=["cpu","cuda"],default="cuda")
-    p.add_argument("--batches",type=_csv_ints,default=_csv_ints("4,8,16,32"))
-    p.add_argument("--precisions",type=_csv_precisions,default=_csv_precisions("fp32,fp16"))
+    p.add_argument("--batches",type=_csv_ints,default=_csv_ints("32"))
+    p.add_argument("--precisions",type=_csv_precisions,default=_csv_precisions("fp32"))
     p.add_argument("--max-frames",type=int,default=600)
     p.add_argument("--output-dir",required=True)
+    p.add_argument("--decode-prefetch-batches",type=int,default=4)
     p.add_argument("--cpu-threads",type=int,default=0)
     p.add_argument("--roi-bottom-fraction",type=float,default=.45)
+    p.add_argument("--ppocr-thresh",type=float,default=.30)
+    p.add_argument("--ppocr-box-thresh",type=float,default=.50)
+    p.add_argument("--high-score",type=float,default=.84)
+    p.add_argument("--low-score",type=float,default=.50)
     p.add_argument("--box-thickness",type=int,default=2)
     p.add_argument("--max-edge-delta",type=float,default=2.0)
     p.add_argument("--max-missing-frame-rate",type=float,default=0.0)

@@ -32,6 +32,7 @@ from .line_grouping import group_candidates_to_lines
 from .line_split import split_frame_detections_by_projection
 from .horizontal_recovery import recover_tracks_horizontal_extents
 from .review import export_event_contact_sheet
+from .runtime import configure_runtime, resolve_device, resolve_precision, synchronize
 from .smoothing import smooth_tracks, synchronize_tracks
 from .types import Candidate, FrameDetections
 from .v5_processor import (
@@ -156,9 +157,18 @@ class SubtitlePipeline:
     def _default_backend(self):
         root=Path(__file__).resolve().parents[2]
         repo,checkpoint=_default_fast_paths(root)
+        device=resolve_device(self.config.device)
+        precision=resolve_precision(self.config.precision,device)
+        configure_runtime(
+            device,
+            self.config.cpu_threads if self.config.cpu_threads>0 else None,
+        )
         return FastBackend(
             repo,
             checkpoint,
+            device=device,
+            precision=precision,
+            batch_size=self.config.batch_size,
             high_score=self.config.high_score,
             low_score=self.config.low_score,
             high_min_area=self.config.high_min_area,
@@ -231,10 +241,13 @@ class SubtitlePipeline:
                 rois.append(frame[y1:y2])
             if not originals:
                 break
+            backend_device=torch.device(
+                getattr(self.backend,"device",resolve_device(self.config.device))
+            )
+            synchronize(backend_device)
             t=time.perf_counter()
             detected=self.backend.detect_batch(rois)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            synchronize(backend_device)
             detector_seconds+=time.perf_counter()-t
             if len(detected)!=len(originals):
                 cap.release()
@@ -719,9 +732,12 @@ class SubtitlePipeline:
         info=probe_video(source)
         target=min(info.frame_count,int(max_frames)) if max_frames else info.frame_count
         cache_path=self._cache_path(source,output)
-        if torch.cuda.is_available():
+        run_device=torch.device(
+            getattr(self.backend,"device",resolve_device(self.config.device))
+        )
+        if run_device.type=="cuda":
             torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_peak_memory_stats(run_device)
 
         frames,detector_seconds,cache_hit=self._detect(source,info,target,cache_path)
 
@@ -950,7 +966,10 @@ class SubtitlePipeline:
             "detector_seconds":detector_seconds,
             "detector_fps":None if detector_seconds<=0 else target/detector_seconds,
             "cache_hit":cache_hit,
-            "peak_vram_mb":float(torch.cuda.max_memory_allocated()/1024**2) if torch.cuda.is_available() else 0.0,
+            "peak_vram_mb":(
+                float(torch.cuda.max_memory_allocated(run_device)/1024**2)
+                if run_device.type=="cuda" else 0.0
+            ),
             "high_candidate_count":sum(len(f.high) for f in frames),
             "low_candidate_count":total_low,
             "line_split_input_candidate_count":split_input_count,

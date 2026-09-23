@@ -2,7 +2,9 @@ from pathlib import Path
 import json
 import cv2
 import numpy as np
+import torch
 from src.video_text.types import Candidate
+from src.video_text.io_probe import probe_video
 from src.video_text.pipeline import PipelineConfig, SubtitlePipeline
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -147,3 +149,53 @@ def test_default_fast_paths_use_single_model_layout():
 
     assert repo == root/"model/FAST"
     assert checkpoint == repo/"checkpoints/fast_base_ic15_736_finetune_ic17mlt.pth"
+
+
+def test_cpu_detection_never_synchronizes_cuda_when_cuda_is_present(monkeypatch):
+    WORK.mkdir(parents=True,exist_ok=True)
+    src=WORK/"cpu_no_cuda_sync.mp4"
+    make_video(src,n=2)
+    backend=FakeBackend({})
+    backend.device=torch.device("cpu")
+    backend.batch_size=2
+    sync_calls=[]
+    monkeypatch.setattr(torch.cuda,"is_available",lambda: True)
+    monkeypatch.setattr(torch.cuda,"synchronize",lambda *a,**k: sync_calls.append(True))
+    pipeline=SubtitlePipeline(
+        PipelineConfig(
+            validate_chinese=False,
+            device="cpu",
+            batch_size=2,
+        ),
+        backend=backend,
+    )
+    info=probe_video(src)
+    cache=WORK/"cpu_no_cuda_sync.cache.json"
+    cache.unlink(missing_ok=True)
+    frames,_,_=pipeline._detect(src,info,2,cache)
+    assert len(frames)==2
+    assert sync_calls==[]
+
+
+def test_cpu_full_run_does_not_touch_cuda_runtime_when_cuda_is_present(monkeypatch):
+    WORK.mkdir(parents=True,exist_ok=True)
+    src=WORK/"cpu_no_cuda_runtime.mp4"
+    make_video(src,n=2)
+    backend=FakeBackend({})
+    backend.device=torch.device("cpu")
+    backend.batch_size=2
+    calls=[]
+    monkeypatch.setattr(torch.cuda,"is_available",lambda: True)
+    monkeypatch.setattr(torch.cuda,"synchronize",lambda *a,**k: calls.append("sync"))
+    monkeypatch.setattr(torch.cuda,"empty_cache",lambda *a,**k: calls.append("empty"))
+    monkeypatch.setattr(torch.cuda,"reset_peak_memory_stats",lambda *a,**k: calls.append("reset"))
+    monkeypatch.setattr(torch.cuda,"max_memory_allocated",lambda *a,**k: calls.append("max") or 0)
+    out=WORK/"cpu_no_cuda_runtime_out.mp4"
+    cache=out.parent/f"{src.stem}.video_text_cache.json"
+    cache.unlink(missing_ok=True)
+    result=SubtitlePipeline(
+        PipelineConfig(validate_chinese=False,device="cpu",batch_size=2),
+        backend=backend,
+    ).run(src,out,max_frames=2)
+    assert result.metrics["peak_vram_mb"]==0.0
+    assert calls==[]

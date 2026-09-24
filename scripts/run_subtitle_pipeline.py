@@ -23,8 +23,25 @@ def build_parser():
     p.add_argument("--output")
     p.add_argument("--roi-bottom-fraction",type=roi_fraction,default=.45)
     p.add_argument("--codec",choices=["h264","h265"],default="h264")
-    p.add_argument("--high-score",type=float,default=.88)
-    p.add_argument("--low-score",type=float,default=.60)
+    p.add_argument("--encode-preset",choices=["ultrafast","superfast","veryfast","faster","fast","medium"],default="veryfast")
+    p.add_argument("--output-encoder",choices=["software","nvenc","nvenc_direct"],default="software")
+    p.add_argument("--detector",choices=["ppocrv5_mobile","fast"],default="ppocrv5_mobile")
+    p.add_argument("--high-score",type=float,default=.84)
+    p.add_argument("--low-score",type=float,default=.50)
+    p.add_argument("--ppocr-thresh",type=float,default=.30)
+    p.add_argument("--ppocr-box-thresh",type=float,default=.50)
+    p.add_argument("--ppocr-cpu-engine",choices=["auto","openvino","onnxruntime","paddle"],default="auto")
+    p.add_argument("--ppocr-openvino-model")
+    p.add_argument("--ppocr-openvino-streams",type=int,default=0)
+    p.add_argument("--ppocr-gpu-engine",choices=["cuda","tensorrt"],default="cuda")
+    p.add_argument("--ppocr-trt-precision",choices=["fp32","fp16"],default="fp32")
+    p.add_argument("--ppocr-trt-cache-dir")
+    p.add_argument("--ppocr-openvino-fuse-preprocess",dest="ppocr_openvino_fuse_preprocess",action="store_true",default=True)
+    p.add_argument("--no-ppocr-openvino-fuse-preprocess",dest="ppocr_openvino_fuse_preprocess",action="store_false")
+    p.add_argument("--ppocr-adaptive-gating",action="store_true",default=False)
+    p.add_argument("--ppocr-gate-max-skip-frames",type=int,default=2)
+    p.add_argument("--ppocr-gate-change-threshold",type=float,default=.02)
+    p.add_argument("--ppocr-gate-bright-net-threshold",type=float,default=.0075)
     p.add_argument("--high-min-area",type=int,default=250)
     p.add_argument("--low-min-area",type=int,default=30)
     p.add_argument("--max-internal-gap",type=int,choices=[1,2],default=2)
@@ -32,9 +49,15 @@ def build_parser():
     p.add_argument("--outline-pad-ratio",type=float,default=.08)
     p.add_argument("--min-outline-pad",type=int,default=3)
     p.add_argument("--temporal-mode",choices=["v4","v5","v5_5","v1"],default="v1")
+    p.add_argument("--device",choices=["auto","cpu","cuda"],default="auto")
+    p.add_argument("--precision",choices=["auto","fp32","fp16"],default="auto")
+    p.add_argument("--batch-size",type=int,default=32)
+    p.add_argument("--decode-prefetch-batches",type=int,default=4)
+    p.add_argument("--cpu-threads",type=int,default=0)
+    p.add_argument("--box-thickness",type=int,default=2)
     p.add_argument("--max-frames",type=int,default=0)
     p.add_argument("--export-coordinates")
-    p.add_argument("--validate-chinese",dest="validate_chinese",action="store_true",default=True)
+    p.add_argument("--validate-chinese",dest="validate_chinese",action="store_true",default=False)
     p.add_argument("--no-validate-chinese",dest="validate_chinese",action="store_false")
     p.add_argument("--recognize-text",action="store_true")
     p.add_argument("--export-srt")
@@ -62,15 +85,36 @@ def main(argv=None):
         p.error("--output is required unless --dry-probe is used")
     cfg=PipelineConfig(
         roi_bottom_fraction=args.roi_bottom_fraction,
+        detector=args.detector,
         high_score=args.high_score,low_score=args.low_score,
+        ppocr_thresh=args.ppocr_thresh,ppocr_box_thresh=args.ppocr_box_thresh,
+        ppocr_cpu_engine=args.ppocr_cpu_engine,
+        ppocr_openvino_model=args.ppocr_openvino_model,
+        ppocr_openvino_streams=args.ppocr_openvino_streams,
+        ppocr_gpu_engine=args.ppocr_gpu_engine,
+        ppocr_trt_precision=args.ppocr_trt_precision,
+        ppocr_trt_cache_dir=args.ppocr_trt_cache_dir,
+        ppocr_openvino_fuse_preprocess=args.ppocr_openvino_fuse_preprocess,
+        ppocr_adaptive_gating=args.ppocr_adaptive_gating,
+        ppocr_gate_max_skip_frames=args.ppocr_gate_max_skip_frames,
+        ppocr_gate_change_threshold=args.ppocr_gate_change_threshold,
+        ppocr_gate_bright_net_threshold=args.ppocr_gate_bright_net_threshold,
         high_min_area=args.high_min_area,low_min_area=args.low_min_area,
         max_internal_gap=args.max_internal_gap,
         smoothing_window=args.smoothing_window,
-        output_codec=args.codec,validate_chinese=args.validate_chinese,
+        output_codec=args.codec,output_preset=args.encode_preset,
+        output_encoder=args.output_encoder,
+        validate_chinese=args.validate_chinese,
         export_srt=bool(args.export_srt),
         outline_pad_ratio=args.outline_pad_ratio,
         min_outline_pad=args.min_outline_pad,
         temporal_mode=args.temporal_mode,
+        device=args.device,
+        precision=args.precision,
+        batch_size=args.batch_size,
+        decode_prefetch_batches=args.decode_prefetch_batches,
+        cpu_threads=args.cpu_threads,
+        box_thickness=args.box_thickness,
     )
     result=SubtitlePipeline(cfg).run(
         args.input,args.output,max_frames=args.max_frames,

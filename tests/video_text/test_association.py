@@ -50,3 +50,16 @@ def test_low_before_high_is_backfilled_but_does_not_exist_alone():
     assert len(tracks)==1
     assert tracks[0].sorted_frames()==[0,1,2]
     assert tracks[0].observations[0].level=="LOW"
+
+
+def test_multiple_pending_low_candidates_on_same_frame_do_not_compare_numpy_boxes():
+    frames=[
+        fd(0,low=[
+            cand([100,800,400,850],.78,"LOW"),
+            cand([500,900,620,940],.76,"LOW"),
+        ]),
+        fd(1,high=[cand([101,800,401,850],.94,"HIGH")]),
+    ]
+    tracks=build_provisional_tracks(frames,cfg())
+    assert len(tracks)==1
+    assert tracks[0].sorted_frames()==[0,1]

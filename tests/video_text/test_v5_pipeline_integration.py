@@ -56,7 +56,7 @@ def test_pipeline_v5_locks_two_line_slots_without_per_frame_split():
     _make_video(src)
     out=WORK/"v5.mp4"
 
-    cfg=PipelineConfig(
+    cfg=PipelineConfig(detector="fast",
         temporal_mode="v5",
         validate_chinese=False,
         roi_bottom_fraction=.45,
@@ -95,7 +95,7 @@ def test_pipeline_v5_rejects_unreadable_pixel_only_second_slot():
     _make_video(src)
     out=WORK/"v5_pixel_only_filtered.mp4"
 
-    cfg=PipelineConfig(
+    cfg=PipelineConfig(detector="fast",
         temporal_mode="v5",
         validate_chinese=True,
         roi_bottom_fraction=.45,

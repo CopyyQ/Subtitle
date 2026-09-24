@@ -19,23 +19,25 @@ git switch feature/cpu-final-6412fe7
 ## RTX 3070 GPU stable
 
 - Branch: `feature/rtx3070-gpu`
-- Acceleration commit: `cb852d8`
+- Acceleration commit: `72cbd07`
 - Detector: same PP-OCRv5 Mobile Det model as CPU
-- Runtime: ONNX Runtime CUDA with fused uint8 NHWC preprocessing
+- Runtime: ONNX Runtime TensorRT FP32 with fused uint8 NHWC preprocessing
+- CUDA EP remains the automatic fallback if TensorRT initialization fails
 - Gate / ROI / thresholds are the same as CPU final
 
 Full 3733-frame RTX 3070 validation:
 
-- 85.77 FPS end-to-end
-- 181.50 detector FPS
-- detection loop: 23.10 s
-- detector: 20.57 s
-- render/encode: 19.05 s
+- 94.81 FPS end-to-end
+- 234.64 detector FPS
+- detection loop: 18.12 s
+- detector: 15.91 s
+- render/encode: 19.31 s
 - 2581 / 2581 final boxes
 - 0 frame count mismatches vs CPU stable
 - edge p95: 0 px
 - edge max: 1 px
 - dropped frames: 0
+- one-time TensorRT engine build is cached outside Git; cached startup is used for production runs
 
 Linux / RTX 3070:
 

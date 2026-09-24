@@ -24,6 +24,7 @@ def build_parser():
     p.add_argument("--roi-bottom-fraction",type=roi_fraction,default=.45)
     p.add_argument("--codec",choices=["h264","h265"],default="h264")
     p.add_argument("--encode-preset",choices=["ultrafast","superfast","veryfast","faster","fast","medium"],default="veryfast")
+    p.add_argument("--output-encoder",choices=["software","nvenc"],default="software")
     p.add_argument("--detector",choices=["ppocrv5_mobile","fast"],default="ppocrv5_mobile")
     p.add_argument("--high-score",type=float,default=.84)
     p.add_argument("--low-score",type=float,default=.50)
@@ -102,6 +103,7 @@ def main(argv=None):
         max_internal_gap=args.max_internal_gap,
         smoothing_window=args.smoothing_window,
         output_codec=args.codec,output_preset=args.encode_preset,
+        output_encoder=args.output_encoder,
         validate_chinese=args.validate_chinese,
         export_srt=bool(args.export_srt),
         outline_pad_ratio=args.outline_pad_ratio,

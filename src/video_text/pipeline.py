@@ -94,6 +94,7 @@ class PipelineConfig:
     smoothing_window: int=5
     output_codec: str="h264"
     output_preset: str="veryfast"
+    output_encoder: str="software"
     validate_chinese: bool=False
     export_srt: bool=False
     outline_pad_ratio: float=.08
@@ -135,6 +136,8 @@ class PipelineConfig:
             raise ValueError("output_codec must be h264 or h265")
         if self.output_preset not in {"ultrafast","superfast","veryfast","faster","fast","medium"}:
             raise ValueError("output_preset must be a supported x264/x265 preset")
+        if self.output_encoder not in {"software","nvenc"}:
+            raise ValueError("output_encoder must be software or nvenc")
         if self.max_internal_gap not in {1,2}:
             raise ValueError("max_internal_gap must be 1 or 2")
         if self.smoothing_window<1 or self.smoothing_window%2==0:
@@ -582,6 +585,7 @@ class SubtitlePipeline:
             fps=info.fps,
             codec=self.config.output_codec,
             preset=self.config.output_preset,
+            engine=self.config.output_encoder,
         )
 
     def _process_v55(self,source,frames,info,target):
@@ -1289,6 +1293,7 @@ class SubtitlePipeline:
             "source_codec":info.fourcc,
             "output_codec":self.config.output_codec,
             "output_preset":self.config.output_preset,
+            "output_encoder":self.config.output_encoder,
             "source_duration_seconds":source_duration_seconds,
             "detector_name":detector_name,
             "detector":self.config.detector,

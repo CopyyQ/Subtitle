@@ -53,3 +53,16 @@ def test_rawvideo_mux_command_accepts_ultrafast_preset(monkeypatch):
         width=720, height=1280, fps=30.0, codec="h264", preset="ultrafast",
     )
     assert ["-preset","ultrafast"] == cmd[cmd.index("-preset"):cmd.index("-preset")+2]
+
+
+def test_rawvideo_mux_command_supports_nvenc(monkeypatch):
+    monkeypatch.setattr("src.video_text.io._ffmpeg", lambda: "ffmpeg")
+    cmd=build_rawvideo_mux_command(
+        source_path="source.mp4", output_path="out.mp4",
+        width=720, height=1280, fps=30.0,
+        codec="h264", preset="ultrafast", engine="nvenc",
+    )
+    assert "h264_nvenc" in cmd
+    assert ["-preset","p1"] == cmd[cmd.index("-preset"):cmd.index("-preset")+2]
+    assert "-crf" not in cmd
+    assert ["-cq:v","18"] == cmd[cmd.index("-cq:v"):cmd.index("-cq:v")+2]

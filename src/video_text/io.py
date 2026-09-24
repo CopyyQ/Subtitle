@@ -18,10 +18,14 @@ def _ffmpeg():
         raise CodecUnavailableError("FFmpeg is unavailable")
     return found
 
-def ffmpeg_video_codec(codec):
-    m={"h264":"libx264","h265":"libx265"}
+def ffmpeg_video_codec(codec, engine="software"):
+    software={"h264":"libx264","h265":"libx265"}
+    nvenc={"h264":"h264_nvenc","h265":"hevc_nvenc"}
+    table=software if engine=="software" else nvenc if engine=="nvenc" else None
+    if table is None:
+        raise ValueError("engine must be software or nvenc")
     try:
-        return m[codec.lower()]
+        return table[codec.lower()]
     except KeyError:
         raise ValueError("codec must be h264 or h265")
 
@@ -44,8 +48,9 @@ def build_rawvideo_mux_command(
     fps,
     codec="h264",
     preset="veryfast",
+    engine="software",
 ):
-    enc=ffmpeg_video_codec(codec)
+    enc=ffmpeg_video_codec(codec,engine)
     cmd=[
         _ffmpeg(),
         "-y",
@@ -62,10 +67,12 @@ def build_rawvideo_mux_command(
     ]
     if codec.lower()=="h264":
         cmd += ["-profile:v","high"]
+    cmd += ["-pix_fmt","yuv420p"]
+    if engine=="nvenc":
+        cmd += ["-preset","p1","-rc:v","vbr","-cq:v","18","-b:v","0"]
+    else:
+        cmd += ["-preset",str(preset),"-crf","18"]
     cmd += [
-        "-pix_fmt","yuv420p",
-        "-preset",str(preset),
-        "-crf","18",
         "-movflags","+faststart",
         "-c:a","copy",
         "-shortest",
@@ -81,6 +88,7 @@ def encode_raw_frames_with_audio(
     fps,
     codec="h264",
     preset="veryfast",
+    engine="software",
 ):
     output=Path(output_path)
     output.parent.mkdir(parents=True,exist_ok=True)
@@ -98,6 +106,7 @@ def encode_raw_frames_with_audio(
         fps=fps,
         codec=codec,
         preset=preset,
+        engine=engine,
     )
     proc=subprocess.Popen(
         cmd,

@@ -28,7 +28,7 @@ missing=required-set(providers)
 if missing: raise SystemExit(f'Missing GPU providers: {sorted(missing)}; available={providers}')
 print('TensorRT',trt.__version__,'providers',providers)
 PY
-ffmpeg -hide_banner -encoders 2>/dev/null | grep -q h264_nvenc || { echo 'h264_nvenc unavailable' >&2; exit 3; }
+ffmpeg -hide_banner -encoders 2>/dev/null | grep h264_nvenc >/dev/null || { echo 'h264_nvenc unavailable' >&2; exit 3; }
 mkdir -p "$OUTDIR" "$TRT_CACHE"
 $PYTHON_BIN scripts/prebuild_gpu_tensorrt.py "$VIDEO" --model "$MODEL" --cache-dir "$TRT_CACHE" --batch-size 64 --precision fp32
 $PYTHON_BIN scripts/run_subtitle_pipeline.py "$VIDEO" \

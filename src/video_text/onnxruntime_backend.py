@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -122,6 +123,7 @@ class ONNXRuntimeTextDetectionPredictor:
         self.profile_hw = None
         self.resize_op = DetResizeForTest(limit_side_len=960, limit_type="max")
         self.postprocess = _DefaultPostprocess(self.thresh, self.box_thresh)
+        self.use_io_binding = os.environ.get("VIDEO_TEXT_ORT_IO_BINDING", "0") == "1"
 
         available = ort.get_available_providers()
         if "CUDAExecutionProvider" not in available:
@@ -200,6 +202,16 @@ class ONNXRuntimeTextDetectionPredictor:
         self.output_name = self.session.get_outputs()[0].name
         self.profile_hw = (height, width)
 
+    def _run_session(self, batch: np.ndarray) -> np.ndarray:
+        if not self.use_io_binding:
+            return self.session.run([self.output_name], {self.input_name: batch})[0]
+        input_value = self.ort.OrtValue.ortvalue_from_numpy(batch, "cuda", 0)
+        binding = self.session.io_binding()
+        binding.bind_ortvalue_input(self.input_name, input_value)
+        binding.bind_output(self.output_name, "cuda", 0)
+        self.session.run_with_iobinding(binding)
+        return binding.copy_outputs_to_cpu()[0]
+
     def predict(self, images: Sequence[np.ndarray]) -> Iterable[dict]:
         if not images:
             return iter(())
@@ -211,7 +223,7 @@ class ONNXRuntimeTextDetectionPredictor:
                 self._create_tensorrt_session(batch.shape)
         elif self.session is None:
             raise RuntimeError("ONNX Runtime session has been released")
-        pred = self.session.run([self.output_name], {self.input_name: batch})[0]
+        pred = self._run_session(batch)
         polys, scores = self.postprocess(pred, shapes, self.thresh, self.box_thresh)
         return iter([
             {"dt_polys": np.asarray(p), "dt_scores": np.asarray(s)}

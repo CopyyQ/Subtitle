@@ -36,6 +36,6 @@ $PYTHON_BIN scripts/run_subtitle_pipeline.py "$VIDEO" \
   --detector ppocrv5_mobile --device cuda --batch-size 64 --decode-prefetch-batches 4 \
   --roi-bottom-fraction .45 --ppocr-gpu-engine tensorrt --ppocr-trt-precision fp32 \
   --ppocr-trt-cache-dir "$TRT_CACHE" --ppocr-adaptive-gating \
-  --ppocr-gate-max-skip-frames 1 --ppocr-gate-change-threshold .015 \
+  --ppocr-gate-max-skip-frames 12 --ppocr-gate-change-threshold .015 \
   --ppocr-gate-bright-net-threshold .0075 --ppocr-thresh .30 --ppocr-box-thresh .50 \
   --high-score .84 --low-score .50 --export-coordinates "$OUTDIR/out.json"

@@ -31,6 +31,11 @@ def _run(cmd):
         raise CodecUnavailableError(p.stderr[-2000:] or "ffmpeg failed")
     return p
 
+
+def _raw_frame_buffer(frame):
+    view=memoryview(frame)
+    return view.cast("B") if view.c_contiguous else frame.tobytes()
+
 def build_rawvideo_mux_command(
     source_path,
     output_path,
@@ -101,11 +106,11 @@ def encode_raw_frames_with_audio(
         stderr=subprocess.PIPE,
     )
     try:
-        proc.stdin.write(first.tobytes())
+        proc.stdin.write(_raw_frame_buffer(first))
         for frame in it:
             if frame.shape[:2]!=(h,w):
                 raise ValueError("all frames must have identical dimensions")
-            proc.stdin.write(frame.tobytes())
+            proc.stdin.write(_raw_frame_buffer(frame))
         proc.stdin.close()
         stderr=proc.stderr.read()
         stdout=proc.stdout.read()

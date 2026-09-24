@@ -31,6 +31,104 @@ def _run(cmd):
         raise CodecUnavailableError(p.stderr[-2000:] or "ffmpeg failed")
     return p
 
+
+def _raw_frame_buffer(frame):
+    view=memoryview(frame)
+    return view.cast("B") if view.c_contiguous else frame.tobytes()
+
+def build_rawvideo_mux_command(
+    source_path,
+    output_path,
+    width,
+    height,
+    fps,
+    codec="h264",
+    preset="veryfast",
+):
+    enc=ffmpeg_video_codec(codec)
+    cmd=[
+        _ffmpeg(),
+        "-y",
+        "-loglevel","error",
+        "-f","rawvideo",
+        "-pix_fmt","bgr24",
+        "-s",f"{int(width)}x{int(height)}",
+        "-r",f"{float(fps):.8f}",
+        "-i","pipe:0",
+        "-i",str(source_path),
+        "-map","0:v:0",
+        "-map","1:a?",
+        "-c:v",enc,
+    ]
+    if codec.lower()=="h264":
+        cmd += ["-profile:v","high"]
+    cmd += [
+        "-pix_fmt","yuv420p",
+        "-preset",str(preset),
+        "-crf","18",
+        "-movflags","+faststart",
+        "-c:a","copy",
+        "-shortest",
+        str(output_path),
+    ]
+    return cmd
+
+
+def encode_raw_frames_with_audio(
+    frames,
+    source_path,
+    output_path,
+    fps,
+    codec="h264",
+    preset="veryfast",
+):
+    output=Path(output_path)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    it=iter(frames)
+    try:
+        first=next(it)
+    except StopIteration:
+        raise ValueError("frames must not be empty")
+    h,w=first.shape[:2]
+    cmd=build_rawvideo_mux_command(
+        source_path=source_path,
+        output_path=output,
+        width=w,
+        height=h,
+        fps=fps,
+        codec=codec,
+        preset=preset,
+    )
+    proc=subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        proc.stdin.write(_raw_frame_buffer(first))
+        for frame in it:
+            if frame.shape[:2]!=(h,w):
+                raise ValueError("all frames must have identical dimensions")
+            proc.stdin.write(_raw_frame_buffer(frame))
+        proc.stdin.close()
+        stderr=proc.stderr.read()
+        stdout=proc.stdout.read()
+        rc=proc.wait()
+    except Exception:
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+        proc.kill()
+        proc.wait()
+        raise
+    if rc:
+        message=stderr.decode("utf-8","replace")[-2000:] if stderr else "ffmpeg failed"
+        raise CodecUnavailableError(message)
+    return output
+
 def encode_video(frames,output_path,fps,codec="h264"):
     output=Path(output_path)
     output.parent.mkdir(parents=True,exist_ok=True)
@@ -75,13 +173,43 @@ def mux_audio(video_only_path,source_path,output_path):
               "-map","0:v:0","-map","1:a?","-c:v","copy","-c:a","aac",str(output_path)])
     return Path(output_path)
 
-def write_coordinate_json(path,metadata,records,events,display_shapes=None):
+def write_coordinate_json(
+    path,metadata,records,events,display_shapes=None,*,frame_count=None,fps=None
+):
     p=Path(path); p.parent.mkdir(parents=True,exist_ok=True)
     event_rows=[e.__dict__ if hasattr(e,"__dict__") else {
         "event_type":e.event_type,"track_id":e.track_id,
         "start_frame":e.start_frame,"end_frame":e.end_frame
     } for e in events]
     payload={"metadata":metadata,"records":records,"events":event_rows}
+    if frame_count is not None:
+        count=int(frame_count)
+        frame_fps=float(fps if fps is not None else metadata.get("fps",0.0))
+        by_frame={i:[] for i in range(count)}
+        for row in records:
+            fi=int(row["frame"])
+            if fi not in by_frame:
+                continue
+            box={
+                "track_id":int(row.get("track_id",0)),
+                "subtitle_id":int(row.get("subtitle_id",row.get("track_id",0))),
+                "line_id":int(row.get("line_id",0)),
+                "bbox":[int(round(float(x))) for x in row["bbox"]],
+                "reconstructed":bool(row.get("reconstructed",False)),
+            }
+            if "source" in row:
+                box["source"]=row["source"]
+            if "confidence" in row:
+                box["confidence"]=row["confidence"]
+            by_frame[fi].append(box)
+        payload["frames"]=[
+            {
+                "frame":i,
+                "timestamp":(i/frame_fps if frame_fps>0 else None),
+                "boxes":by_frame[i],
+            }
+            for i in range(count)
+        ]
     if display_shapes is not None:
         payload["display_shapes"]=display_shapes
     p.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding="utf-8")

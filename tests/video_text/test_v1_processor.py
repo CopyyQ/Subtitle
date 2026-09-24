@@ -86,6 +86,50 @@ def test_static_two_line_tracks_become_fully_locked_and_non_overlapping():
     assert metrics["prelock_max_edge_range_px"] >= 4.0
 
 
+def test_static_lock_applies_pairwise_seams_when_three_line_fragments_have_no_global_common_frame():
+    from src.video_text.v55_geometry import line_overlap_area
+
+    src = WORK / "pairwise_seams.mp4"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (360, 240)
+    )
+    assert writer.isOpened()
+    for _ in range(10):
+        writer.write(np.full((240, 360, 3), 110, np.uint8))
+    writer.release()
+
+    middle = _track_at(701, 0, 9, [80, 120, 280, 180])
+    early_top = _track_at(702, 3, 4, [150, 105, 210, 130])
+    late_bottom = _track_at(703, 8, 9, [150, 170, 210, 205])
+    identity = {
+        702: (77, 0),
+        701: (77, 1),
+        703: (77, 2),
+    }
+
+    metrics = apply_v1_static_geometry_lock(
+        src,
+        [middle, early_top, late_bottom],
+        identity,
+        sample_count=5,
+        pad_px=2,
+    )
+
+    for fi in (3, 4):
+        assert line_overlap_area(
+            early_top.observations[fi].bbox,
+            middle.observations[fi].bbox,
+        ) == 0.0
+    for fi in (8, 9):
+        assert line_overlap_area(
+            middle.observations[fi].bbox,
+            late_bottom.observations[fi].bbox,
+        ) == 0.0
+    assert metrics["final_overlap_frame_count"] == 0
+    assert metrics["temporal_seam_adjustment_count"] >= 2
+
+
 def test_static_lock_keeps_short_wrapped_second_line_short():
     src = WORK / "short_second_line.mp4"
     _make_two_line_video(src)
@@ -431,6 +475,98 @@ def test_temporal_glyph_tightener_shrinks_loose_static_box_without_jitter():
     assert box[1] <= 118 and box[3] >= 168
     assert metrics["glyph_tightened_track_count"] == 1
     assert metrics["glyph_tightening_area_ratio_median"] < .85
+
+
+def test_temporal_glyph_tightener_shrinks_without_recognizer_and_ignores_transient_noise():
+    from src.video_text.v1_processor import (
+        tighten_v1_static_tracks_with_temporal_glyphs,
+    )
+
+    src = WORK / "glyph_tighten_no_ocr.mp4"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (360, 240)
+    )
+    assert writer.isOpened()
+    for i in range(15):
+        frame = np.full((240, 360, 3), 110, np.uint8)
+        _outlined_glyph_band(frame, 80, 120, 280, 166)
+        if i == 7:
+            cv2.rectangle(frame, (30, 102), (52, 198), (245, 245, 245), -1)
+        writer.write(frame)
+    writer.release()
+
+    track = _track_at(225, 0, 14, [55, 105, 310, 190])
+    old_area = float((310 - 55) * (190 - 105))
+    metrics = tighten_v1_static_tracks_with_temporal_glyphs(
+        src, [track], {225: (260, 0)}, recognizer=None,
+        sample_count=15, safety_pad=4,
+    )
+    boxes = {
+        tuple(np.round(track.observations[f].bbox, 3))
+        for f in track.sorted_frames()
+    }
+    assert len(boxes) == 1
+    box = next(iter(boxes))
+    new_area = float((box[2] - box[0]) * (box[3] - box[1]))
+    assert new_area < .98 * old_area
+    assert box[0] <= 78 and box[2] >= 282
+    assert box[1] <= 118 and box[3] >= 168
+    assert box[0] > 52
+    assert metrics["glyph_tightened_track_count"] == 1
+
+
+def test_temporal_glyph_tightener_without_ocr_keeps_persistent_thin_leading_glyph():
+    from src.video_text.v1_processor import (
+        tighten_v1_static_tracks_with_temporal_glyphs,
+    )
+
+    src = WORK / "glyph_tighten_thin_no_ocr.mp4"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (360, 240)
+    )
+    assert writer.isOpened()
+    for _ in range(11):
+        frame = np.full((240, 360, 3), 110, np.uint8)
+        cv2.rectangle(frame, (70, 139), (108, 144), (245, 245, 245), -1)
+        cv2.rectangle(frame, (68, 137), (110, 146), (8, 8, 8), 2)
+        _outlined_glyph_band(frame, 122, 120, 280, 166)
+        writer.write(frame)
+    writer.release()
+
+    track = _track_at(226, 0, 10, [55, 100, 310, 195])
+    tighten_v1_static_tracks_with_temporal_glyphs(
+        src, [track], {226: (261, 0)}, recognizer=None,
+        sample_count=11, safety_pad=4,
+    )
+    box = track.observations[0].bbox
+    assert box[0] <= 68
+    assert box[2] >= 282
+
+
+def test_visual_only_adjacent_segments_merge_only_at_high_similarity():
+    a = _track_at(227, 0, 5, [80, 120, 280, 170])
+    b = _track_at(228, 6, 11, [82, 121, 282, 171])
+    tracks, _, _, metrics = merge_v1_same_content_tracks(
+        None, [a, b], {227: (262, 0), 228: (263, 0)},
+        recognizer=None,
+        text_evidence={227: [], 228: []},
+        visual_evidence={(227, 228): .96},
+    )
+    assert [t.track_id for t in tracks] == [227]
+    assert metrics["merged_track_count"] == 1
+
+    c = _track_at(229, 0, 5, [80, 120, 280, 170])
+    d = _track_at(230, 6, 11, [82, 121, 282, 171])
+    tracks, _, _, metrics = merge_v1_same_content_tracks(
+        None, [c, d], {229: (264, 0), 230: (265, 0)},
+        recognizer=None,
+        text_evidence={229: [], 230: []},
+        visual_evidence={(229, 230): .90},
+    )
+    assert [t.track_id for t in tracks] == [229, 230]
+    assert metrics["merged_track_count"] == 0
 
 
 def test_temporal_glyph_tightener_falls_back_when_candidate_loses_text():

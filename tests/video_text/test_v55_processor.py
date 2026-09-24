@@ -275,3 +275,49 @@ def test_weak_identity_tie_prefers_nearest_vertical_strong_track():
     )
 
     assert identity[303][0]==10
+
+
+def test_weak_birth_rejects_persistent_glyph_far_from_slot_center():
+    src=WORK/"weak_offcenter_noise.mp4"
+    src.parent.mkdir(parents=True,exist_ok=True)
+    w=cv2.VideoWriter(str(src),cv2.VideoWriter_fourcc(*"mp4v"),10.0,(320,220))
+    assert w.isOpened()
+    for _ in range(6):
+        f=np.full((220,320,3),80,np.uint8)
+        # Inside the old weak-birth tolerance (~0.8 font heights) but far
+        # enough from the learned subtitle center to be scene/UI noise.
+        _outlined_rect(f,185,150,209,185)
+        w.write(f)
+    w.release()
+
+    weak,metrics=discover_v55_weak_tracks(
+        src,[],
+        [SlotPrior(142,193,160,51)],
+        frame_count=6,frame_width=320,frame_height=220,
+        confirm_frames=3,
+    )
+
+    assert weak==[]
+    assert metrics["weak_track_count"]==0
+
+
+def test_pixel_only_filter_keeps_prior_aligned_and_rejects_bad_geometry():
+    from src.video_text.v55_processor import filter_v55_pixel_only_tracks
+
+    def pixel(track_id,box):
+        t=_strong_track(track_id,0,4,box)
+        for fi in t.sorted_frames():
+            t.observations[fi].level="V55_LINE_PIXEL_ONLY"
+        return t
+
+    good=pixel(404,[137,149,183,190])
+    off_center=pixel(405,[240,149,286,190])
+    oversized=pixel(406,[100,120,220,210])
+
+    kept,rejected=filter_v55_pixel_only_tracks(
+        [good,off_center,oversized],
+        [SlotPrior(142,193,160,51)],
+    )
+
+    assert [t.track_id for t in kept]==[404]
+    assert rejected==2

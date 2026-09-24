@@ -65,12 +65,28 @@ def validate_track(track,frames,recognizer,max_samples=3,min_confidence=.70):
     return ValidationDecision(status,texts,ratio)
 
 class EasyOCRChineseRecognizer:
+    supports_detection=False
+
     def __init__(self,gpu=True):
         import easyocr
-        self.reader=easyocr.Reader(["ch_sim","en"],gpu=gpu,verbose=False)
+        self.reader=easyocr.Reader(
+            ["ch_sim","en"],
+            gpu=gpu,
+            detector=False,
+            recognizer=True,
+            verbose=False,
+            cudnn_benchmark=bool(gpu),
+        )
 
     def recognize(self,crop):
-        rows=self.reader.readtext(crop,detail=1,paragraph=False)
+        rows=self.reader.recognize(
+            crop,
+            detail=1,
+            decoder="greedy",
+            batch_size=1,
+            paragraph=False,
+            contrast_ths=0.0,
+        )
         if not rows:
             return "",0.0
         text="".join(str(r[1]) for r in rows)

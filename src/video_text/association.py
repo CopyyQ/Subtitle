@@ -108,7 +108,7 @@ def build_provisional_tracks(frames, config=None):
             t=SubtitleTrack(next_id,confirmed=True)
             next_id+=1
             t.observations[fi]=TrackObservation(fi,c.bbox,c.score,"HIGH")
-            for pfi,pc in sorted(pending_low,reverse=True):
+            for pfi,pc in sorted(pending_low,key=lambda x:x[0],reverse=True):
                 if 0 < fi-pfi <= cfg.backfill_frames and compatible(pc.bbox,c.bbox,cfg):
                     t.observations[pfi]=TrackObservation(pfi,pc.bbox,pc.score,"LOW")
             if t.observations:

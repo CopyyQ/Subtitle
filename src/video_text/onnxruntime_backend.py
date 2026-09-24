@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -128,6 +129,11 @@ class ONNXRuntimeTextDetectionPredictor:
         self.trt_auxiliary_streams = int(os.environ.get("VIDEO_TEXT_TRT_AUX_STREAMS", "0"))
         self.trt_builder_level = int(os.environ.get("VIDEO_TEXT_TRT_BUILDER_LEVEL", "3"))
         self.trt_opt_batch = int(os.environ.get("VIDEO_TEXT_TRT_OPT_BATCH", "0"))
+        self.profile_batches = 0
+        self.profile_items = 0
+        self.profile_prepare_seconds = 0.0
+        self.profile_infer_seconds = 0.0
+        self.profile_postprocess_seconds = 0.0
         if self.trt_workspace_bytes <= 0:
             raise ValueError("VIDEO_TEXT_TRT_WORKSPACE_BYTES must be positive")
         if not -1 <= self.trt_auxiliary_streams <= 32:
@@ -227,7 +233,11 @@ class ONNXRuntimeTextDetectionPredictor:
     def predict(self, images: Sequence[np.ndarray]) -> Iterable[dict]:
         if not images:
             return iter(())
+        t0 = time.perf_counter()
         batch, shapes, _ = prepare_fused_inputs(images, resize_op=self.resize_op)
+        self.profile_prepare_seconds += time.perf_counter() - t0
+        self.profile_batches += 1
+        self.profile_items += len(images)
         hw = (int(batch.shape[1]), int(batch.shape[2]))
         if self.runtime == "tensorrt":
             if self.session is None or self.profile_hw != hw:
@@ -235,8 +245,12 @@ class ONNXRuntimeTextDetectionPredictor:
                 self._create_tensorrt_session(batch.shape)
         elif self.session is None:
             raise RuntimeError("ONNX Runtime session has been released")
+        t1 = time.perf_counter()
         pred = self._run_session(batch)
+        self.profile_infer_seconds += time.perf_counter() - t1
+        t2 = time.perf_counter()
         polys, scores = self.postprocess(pred, shapes, self.thresh, self.box_thresh)
+        self.profile_postprocess_seconds += time.perf_counter() - t2
         return iter([
             {"dt_polys": np.asarray(p), "dt_scores": np.asarray(s)}
             for p, s in zip(polys, scores)

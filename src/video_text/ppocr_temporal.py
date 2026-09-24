@@ -66,6 +66,64 @@ def _copy_observation(obs: TrackObservation) -> TrackObservation:
     )
 
 
+def _stable_geometry_boundaries(
+    track: SubtitleTrack,
+    *,
+    window: int = 3,
+    stable_edge_range_px: float = 7.0,
+    min_edge_shift_px: float = 18.0,
+    min_width_ratio: float = 1.12,
+) -> set[int]:
+    """Find persistent geometry changes hidden by permissive IoU tracking.
+
+    PP-OCR can keep different subtitle sentences in one track when their
+    centers are nearly identical. A boundary is accepted only when both
+    sides are locally stable for several consecutive frames, so detector
+    jitter and one-frame transition noise do not create extra segments.
+    """
+    fs = track.sorted_frames()
+    window = max(2, int(window))
+    candidates = []
+    for i in range(window, len(fs) - window + 1):
+        left_ids = fs[i - window:i]
+        right_ids = fs[i:i + window]
+        joined = left_ids + right_ids
+        if any(b - a != 1 for a, b in zip(joined, joined[1:])):
+            continue
+        left = np.stack([track.observations[f].bbox for f in left_ids])
+        right = np.stack([track.observations[f].bbox for f in right_ids])
+        if float(np.max(np.ptp(left, axis=0))) > float(stable_edge_range_px):
+            continue
+        if float(np.max(np.ptp(right, axis=0))) > float(stable_edge_range_px):
+            continue
+        lbox = np.median(left, axis=0)
+        rbox = np.median(right, axis=0)
+        lw = max(1.0, float(lbox[2] - lbox[0]))
+        rw = max(1.0, float(rbox[2] - rbox[0]))
+        width_ratio = max(lw, rw) / min(lw, rw)
+        edge_shift = max(
+            abs(float(lbox[0] - rbox[0])),
+            abs(float(lbox[2] - rbox[2])),
+        )
+        if (
+            edge_shift >= float(min_edge_shift_px)
+            or width_ratio >= float(min_width_ratio)
+        ):
+            score = max(edge_shift, 100.0 * (width_ratio - 1.0))
+            candidates.append((int(fs[i]), float(score)))
+
+    # Adaptive gating may duplicate a boundary over adjacent frames. Keep the
+    # strongest candidate in a small neighborhood.
+    chosen = []
+    for frame_index, score in candidates:
+        if chosen and frame_index - chosen[-1][0] <= 2:
+            if score > chosen[-1][1]:
+                chosen[-1] = (frame_index, score)
+        else:
+            chosen.append((frame_index, score))
+    return {frame_index for frame_index, _ in chosen}
+
+
 def _split_geometry_segments(
     tracks: list[SubtitleTrack],
     *,
@@ -77,12 +135,13 @@ def _split_geometry_segments(
     next_id = 1
     for track in tracks:
         frames = track.sorted_frames()
+        stable_boundaries = _stable_geometry_boundaries(track)
         current: list[TrackObservation] = []
         previous: TrackObservation | None = None
         for fi in frames:
             obs = track.observations[fi]
-            split = False
-            if previous is not None:
+            split = bool(previous is not None and fi in stable_boundaries)
+            if previous is not None and not split:
                 distance = fi - previous.frame_index
                 if distance > config.max_internal_gap + 1:
                     split = True
@@ -115,6 +174,97 @@ def _split_geometry_segments(
             }
             segments.append(seg)
     return segments, transition_splits
+
+
+def _merge_short_low_fragments(
+    tracks: list[SubtitleTrack],
+    *,
+    max_fragment_frames: int = 2,
+    max_gap: int = 1,
+    max_center_x_px: float = 25.0,
+    max_center_y_px: float = 35.0,
+    max_width_ratio: float = 1.30,
+) -> tuple[list[SubtitleTrack], int]:
+    """Merge tiny LOW-only transition fragments into a stable neighbor.
+
+    A single noisy LOW frame can be much taller than the true subtitle box.
+    Keeping it as its own track makes canonicalization preserve that bad
+    geometry. Merge only when a nearby HIGH track has matching center/width.
+    """
+    tracks = list(tracks)
+    spans = []
+    for track in tracks:
+        fs = track.sorted_frames()
+        if fs:
+            spans.append((min(fs), max(fs), track))
+    spans.sort(key=lambda row: (row[0], row[1], row[2].track_id))
+
+    removed = set()
+    merged = 0
+    for idx, (start, end, fragment) in enumerate(spans):
+        if fragment.track_id in removed:
+            continue
+        fs = fragment.sorted_frames()
+        if not fs or len(fs) > int(max_fragment_frames):
+            continue
+        levels = [fragment.observations[f].level for f in fs]
+        if any(level != "LOW" for level in levels):
+            continue
+        fbox = _canonical_bbox(fragment)
+        fc = _center(fbox)
+        fw = max(1.0, float(fbox[2] - fbox[0]))
+
+        candidates = []
+        for neighbor_idx in (idx - 1, idx + 1):
+            if not 0 <= neighbor_idx < len(spans):
+                continue
+            nstart, nend, neighbor = spans[neighbor_idx]
+            if neighbor.track_id in removed:
+                continue
+            nfs = neighbor.sorted_frames()
+            if len(nfs) < 4:
+                continue
+            high_fraction = sum(
+                neighbor.observations[f].level == "HIGH" for f in nfs
+            ) / float(len(nfs))
+            if high_fraction < .75:
+                continue
+            gap = (
+                start - nend - 1
+                if nend < start
+                else nstart - end - 1
+            )
+            if not 0 <= gap <= int(max_gap):
+                continue
+            nbox = _canonical_bbox(neighbor)
+            nc = _center(nbox)
+            nw = max(1.0, float(nbox[2] - nbox[0]))
+            width_ratio = max(fw, nw) / min(fw, nw)
+            dx = abs(float(fc[0] - nc[0]))
+            dy = abs(float(fc[1] - nc[1]))
+            if width_ratio > float(max_width_ratio):
+                continue
+            if dx > float(max_center_x_px) or dy > float(max_center_y_px):
+                continue
+            score = dx + .5 * dy + 20.0 * (width_ratio - 1.0) + 5.0 * gap
+            candidates.append((score, neighbor))
+
+        if not candidates:
+            continue
+        _, target = min(candidates, key=lambda row: row[0])
+        for fi in fs:
+            target.observations[fi] = _copy_observation(fragment.observations[fi])
+        removed.add(fragment.track_id)
+        merged += 1
+
+    kept = [track for track in tracks if track.track_id not in removed]
+    kept.sort(
+        key=lambda track: (
+            min(track.sorted_frames()) if track.sorted_frames() else 10**12,
+            track.track_id,
+        )
+    )
+    return kept, merged
 
 
 def _fill_internal_gaps(
@@ -258,6 +408,7 @@ def build_ppocr_temporal_tracks(
         frame_height=frame_height,
         config=cfg,
     )
+    tracks, low_fragment_merges = _merge_short_low_fragments(tracks)
     transition_preserved = transition_splits + _count_preserved_transition_gaps(
         tracks,
         frame_height=frame_height,
@@ -293,6 +444,7 @@ def build_ppocr_temporal_tracks(
     metrics = {
         "ppocr_track_count": len(tracks),
         "ppocr_low_backfill_count": low_count,
+        "ppocr_low_fragment_merge_count": low_fragment_merges,
         "ppocr_gap_fill_count": gap_count,
         "ppocr_transition_gap_preserved_count": transition_preserved,
         "ppocr_out_of_band_rejected_count": rejected,
@@ -698,9 +850,18 @@ def canonicalize_ppocr_tracks(
         ]
         if not boxes:
             boxes = [obs.bbox for obs in track.observations.values()]
-        canonical = _box_union(boxes)
-        canonical = canonical + np.array(
-            [-pad, -pad, pad, pad],
+        # Use a robust envelope rather than a full union. The 10th/90th
+        # percentiles ignore isolated detector spikes while preserving a
+        # safety margin around genuine glyph extents. Round outward so the
+        # canonical box never becomes accidentally too tight.
+        arr = np.stack(boxes, axis=0).astype(np.float32)
+        canonical = np.array(
+            [
+                np.floor(np.percentile(arr[:, 0], 10.0)) - pad,
+                np.floor(np.percentile(arr[:, 1], 10.0)) - pad,
+                np.ceil(np.percentile(arr[:, 2], 90.0)) + pad,
+                np.ceil(np.percentile(arr[:, 3], 90.0)) + pad,
+            ],
             np.float32,
         )
         for obs in track.observations.values():

@@ -45,7 +45,9 @@ from .horizontal_recovery import recover_tracks_horizontal_extents
 from .review import export_event_contact_sheet
 from .runtime import configure_runtime, resolve_device, resolve_precision, synchronize
 from .smoothing import smooth_tracks, synchronize_tracks
+from .text_enhancement import white_black_text_mask
 from .types import Candidate, FrameDetections
+from .v55_geometry import estimate_separator_seam
 from .v5_processor import (
     build_v5_strong_tracks,
     discover_v5_weak_tracks,
@@ -60,6 +62,8 @@ from .v55_processor import (
     v55_weak_height_baselines,
 )
 from .v1_processor import (
+    _sample_ids,
+    _temporal_glyph_candidate,
     absorb_v1_transition_fragments,
     apply_v1_static_geometry_lock,
     merge_v1_same_content_tracks,
@@ -193,6 +197,231 @@ def _corner_motion(tracks):
     if not vals:
         return 0.0,0.0
     return float(np.median(vals)),float(np.percentile(vals,95))
+
+
+def _ppocr_track_static_box(track):
+    fs=track.sorted_frames()
+    if not fs:
+        return None
+    return np.median(
+        np.stack([track.observations[fi].bbox for fi in fs]),
+        axis=0,
+    ).astype(np.float32)
+
+
+def _ppocr_consensus_extent(frames,box):
+    box=np.asarray(box,np.float32)
+    if not frames:
+        return None
+    h,w=frames[0].shape[:2]
+    x1=max(0,min(w,int(round(float(box[0])))))
+    y1=max(0,min(h,int(round(float(box[1])))))
+    x2=max(0,min(w,int(round(float(box[2])))))
+    y2=max(0,min(h,int(round(float(box[3])))))
+    if x2<=x1 or y2<=y1:
+        return None
+    masks=[]
+    for frame in frames:
+        crop=frame[y1:y2,x1:x2]
+        if crop.size:
+            masks.append(white_black_text_mask(crop)>0)
+    if not masks:
+        return None
+    vote=np.sum(np.stack(masks,axis=0),axis=0)
+    need=(len(masks)+1)//2
+    ys,xs=np.where(vote>=need)
+    if not len(xs):
+        return None
+    return np.array([
+        float(xs.min()+x1),
+        float(ys.min()+y1),
+        float(xs.max()+1+x1),
+        float(ys.max()+1+y1),
+    ],np.float32)
+
+
+def _refine_ppocr_multiline_geometry(video_path,tracks,*,sample_count=5):
+    tracks=list(tracks)
+    meta={}
+    for track in tracks:
+        fs=track.sorted_frames()
+        if not fs:
+            continue
+        box=_ppocr_track_static_box(track)
+        levels=[track.observations[fi].level for fi in fs]
+        meta[track.track_id]={
+            "track":track,
+            "frames":set(fs),
+            "box":box,
+            "weak":any(level=="PP_WEAK_HOLD" for level in levels),
+        }
+
+    pairs=[]
+    tids=sorted(meta)
+    for i,first_id in enumerate(tids):
+        first=meta[first_id]
+        first_box=first["box"]
+        first_center=.5*(first_box[:2]+first_box[2:])
+        for second_id in tids[i+1:]:
+            second=meta[second_id]
+            common=first["frames"] & second["frames"]
+            if len(common)<4:
+                continue
+            second_box=second["box"]
+            second_center=.5*(second_box[:2]+second_box[2:])
+            if abs(float(first_center[0]-second_center[0]))>120.0:
+                continue
+            if float(first_center[1])<=float(second_center[1]):
+                top_id,bottom_id=first_id,second_id
+            else:
+                top_id,bottom_id=second_id,first_id
+            top=meta[top_id]["box"]
+            bottom=meta[bottom_id]["box"]
+            top_cy=.5*float(top[1]+top[3])
+            bottom_cy=.5*float(bottom[1]+bottom[3])
+            center_gap=bottom_cy-top_cy
+            vertical_gap=float(bottom[1]-top[3])
+            if not 15.0<=center_gap<=100.0:
+                continue
+            if vertical_gap>20.0:
+                continue
+            top_sample_ids=_sample_ids(sorted(common),int(sample_count))
+            bottom_sample_ids=_sample_ids(sorted(common),3)
+            if top_sample_ids:
+                pairs.append(
+                    (top_id,bottom_id,top_sample_ids,bottom_sample_ids)
+                )
+
+    if not pairs:
+        return {
+            "ppocr_multiline_pixel_refine_pair_count":0,
+            "ppocr_multiline_pixel_refine_track_count":0,
+            "ppocr_multiline_pixel_refine_sample_count":0,
+        }
+
+    wanted=sorted({
+        fi
+        for _,_,top_sample_ids,bottom_sample_ids in pairs
+        for fi in (*top_sample_ids,*bottom_sample_ids)
+    })
+    cap=cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return {
+            "ppocr_multiline_pixel_refine_pair_count":0,
+            "ppocr_multiline_pixel_refine_track_count":0,
+            "ppocr_multiline_pixel_refine_sample_count":0,
+        }
+    frame_map={}
+    for fi in wanted:
+        cap.set(cv2.CAP_PROP_POS_FRAMES,int(fi))
+        ok,frame=cap.read()
+        if ok:
+            frame_map[int(fi)]=frame
+    cap.release()
+
+    refined_tracks=set()
+    refined_pairs=0
+    for top_id,bottom_id,top_sample_ids,bottom_sample_ids in pairs:
+        frames=[
+            frame_map[fi]
+            for fi in top_sample_ids
+            if fi in frame_map
+        ]
+        bottom_frames=[
+            frame_map[fi]
+            for fi in bottom_sample_ids
+            if fi in frame_map
+        ]
+        if not frames:
+            continue
+        if not bottom_frames:
+            bottom_frames=frames
+        top_track=meta[top_id]["track"]
+        bottom_track=meta[bottom_id]["track"]
+        top=meta[top_id]["box"].copy()
+        bottom=meta[bottom_id]["box"].copy()
+
+        seams=[
+            estimate_separator_seam(frame,top,bottom,search_pad=12)
+            for frame in frames
+        ]
+        seam=float(np.median(np.asarray(seams,np.float32)))+2.0
+        seam=max(float(top[1])+8.0,min(float(bottom[3])-8.0,seam))
+        top[3]=seam
+        bottom[1]=seam
+
+        try:
+            tightened=_temporal_glyph_candidate(
+                frames,
+                top,
+                safety_pad=5,
+                vote_threshold=.50,
+            ).astype(np.float32)
+
+            # Keep a stable, visible outline margin around the glyph core.
+            # The temporal consensus is allowed to remove large empty bands
+            # (notably above the top subtitle row) but must not clip side
+            # strokes because of a locally weak antialiased outline.
+            tightened[0]=min(
+                float(tightened[0]),
+                float(top[0])+8.0,
+            )
+            tightened[1]=min(
+                float(tightened[1]),
+                float(top[1])+12.0,
+            )
+            tightened[2]=max(
+                float(tightened[2]),
+                float(top[2])-8.0,
+            )
+            tightened[2]=min(
+                float(top[2]),
+                float(tightened[2])+1.0,
+            )
+            tightened[3]=seam
+            top=tightened
+        except Exception:
+            pass
+
+        top_h=max(1.0,float(top[3]-top[1]))
+        top_w=max(1.0,float(top[2]-top[0]))
+        bottom_w=max(1.0,float(bottom[2]-bottom[0]))
+
+        if meta[bottom_id]["weak"]:
+            extent=_ppocr_consensus_extent(bottom_frames,bottom)
+            if extent is not None:
+                bottom=extent+np.array([-2.0,-2.0,2.0,2.0],np.float32)
+                bottom[1]=max(float(bottom[1]),seam)
+        elif bottom_w<.50*top_w:
+            try:
+                tightened=_temporal_glyph_candidate(
+                    bottom_frames,
+                    bottom,
+                    safety_pad=3,
+                )
+                tightened[1]=seam
+                bottom=tightened.astype(np.float32)
+            except Exception:
+                pass
+            max_height=top_h+6.0
+            if float(bottom[3]-bottom[1])>max_height:
+                bottom[3]=float(bottom[1])+max_height
+
+        for obs in top_track.observations.values():
+            obs.bbox=top.copy()
+        for obs in bottom_track.observations.values():
+            obs.bbox=bottom.copy()
+        meta[top_id]["box"]=top.copy()
+        meta[bottom_id]["box"]=bottom.copy()
+        refined_tracks.add(top_id)
+        refined_tracks.add(bottom_id)
+        refined_pairs+=1
+
+    return {
+        "ppocr_multiline_pixel_refine_pair_count":int(refined_pairs),
+        "ppocr_multiline_pixel_refine_track_count":int(len(refined_tracks)),
+        "ppocr_multiline_pixel_refine_sample_count":int(len(frame_map)),
+    }
 
 
 def _default_fast_paths(root: Path):
@@ -948,6 +1177,11 @@ class SubtitlePipeline:
             tracks,
             min_gap=1,
         )
+        pixel_refine_metrics=_refine_ppocr_multiline_geometry(
+            source,
+            tracks,
+            sample_count=5,
+        )
 
         for track in strong_tracks:
             for obs in track.observations.values():
@@ -962,6 +1196,7 @@ class SubtitlePipeline:
             **weak_metrics,
             **canonical_metrics,
             **seam_metrics,
+            **pixel_refine_metrics,
             "ppocr_used_low_count":used_low_count,
             "multiline_overlap_frame_count":seam_metrics[
                 "ppocr_multiline_overlap_frame_count"

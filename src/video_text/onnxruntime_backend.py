@@ -124,6 +124,16 @@ class ONNXRuntimeTextDetectionPredictor:
         self.resize_op = DetResizeForTest(limit_side_len=960, limit_type="max")
         self.postprocess = _DefaultPostprocess(self.thresh, self.box_thresh)
         self.use_io_binding = os.environ.get("VIDEO_TEXT_ORT_IO_BINDING", "0") == "1"
+        self.trt_workspace_bytes = int(os.environ.get("VIDEO_TEXT_TRT_WORKSPACE_BYTES", "2147483648"))
+        self.trt_auxiliary_streams = int(os.environ.get("VIDEO_TEXT_TRT_AUX_STREAMS", "0"))
+        self.trt_builder_level = int(os.environ.get("VIDEO_TEXT_TRT_BUILDER_LEVEL", "3"))
+        self.trt_opt_batch = int(os.environ.get("VIDEO_TEXT_TRT_OPT_BATCH", "0"))
+        if self.trt_workspace_bytes <= 0:
+            raise ValueError("VIDEO_TEXT_TRT_WORKSPACE_BYTES must be positive")
+        if not -1 <= self.trt_auxiliary_streams <= 32:
+            raise ValueError("VIDEO_TEXT_TRT_AUX_STREAMS must be within -1..32")
+        if not 0 <= self.trt_builder_level <= 5:
+            raise ValueError("VIDEO_TEXT_TRT_BUILDER_LEVEL must be within 0..5")
 
         available = ort.get_available_providers()
         if "CUDAExecutionProvider" not in available:
@@ -166,21 +176,23 @@ class ONNXRuntimeTextDetectionPredictor:
         _, height, width, channels = [int(x) for x in batch_shape]
         if channels != 3:
             raise ValueError("TensorRT fused input must be NHWC with 3 channels")
-        cache = self.trt_cache_dir / f"{height}x{width}_{self.precision}_b{self.max_batch_size}"
+        opt_batch = self.trt_opt_batch or min(40, self.max_batch_size)
+        opt_batch = max(1, min(opt_batch, self.max_batch_size))
+        tune = f"w{self.trt_workspace_bytes}_a{self.trt_auxiliary_streams}_o{self.trt_builder_level}_opt{opt_batch}"
+        cache = self.trt_cache_dir / f"{height}x{width}_{self.precision}_b{self.max_batch_size}_{tune}"
         cache.mkdir(parents=True, exist_ok=True)
-        opt_batch = min(40, self.max_batch_size)
         input_name = "images_uint8_nhwc"
         profile = lambda n: f"{input_name}:{n}x{height}x{width}x3"
         trt_options = {
             "device_id": 0,
             "trt_fp16_enable": self.precision == "fp16",
-            "trt_max_workspace_size": 2147483648,
+            "trt_max_workspace_size": self.trt_workspace_bytes,
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": str(cache),
             "trt_timing_cache_enable": True,
             "trt_timing_cache_path": str(cache),
-            "trt_auxiliary_streams": 0,
-            "trt_builder_optimization_level": 3,
+            "trt_auxiliary_streams": self.trt_auxiliary_streams,
+            "trt_builder_optimization_level": self.trt_builder_level,
             "trt_profile_min_shapes": profile(1),
             "trt_profile_opt_shapes": profile(opt_batch),
             "trt_profile_max_shapes": profile(self.max_batch_size),

@@ -1373,7 +1373,11 @@ class SubtitlePipeline:
         metrics["output_frame_count"]=target
         metrics["dropped_frame_count"]=0
         root=Path(__file__).resolve().parents[2]
-        _,checkpoint=_default_fast_paths(root)
+        if self.config.detector=="fast":
+            _,checkpoint=_default_fast_paths(root)
+        else:
+            model_path=getattr(getattr(self.backend,"predictor",None),"model_path",None)
+            checkpoint=Path(model_path) if model_path else None
         metrics["environment"]=collect_environment_metadata(
             root,checkpoint,detector_name=detector_name
         )

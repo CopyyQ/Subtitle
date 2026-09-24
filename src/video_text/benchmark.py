@@ -65,11 +65,11 @@ def _distribution_version(*names):
 
 def collect_environment_metadata(
     project_root: Path,
-    checkpoint: Path,
+    checkpoint: Path | None,
     detector_name: str | None = None,
 ) -> dict:
     root=Path(project_root)
-    checkpoint=Path(checkpoint)
+    checkpoint_path=Path(checkpoint) if checkpoint is not None else None
     try:
         cuda_available=bool(torch.cuda.is_available())
     except Exception:
@@ -79,6 +79,8 @@ def collect_environment_metadata(
     except Exception:
         gpu_name=None
     fast_root=root/"model"/"FAST"
+    is_fast=str(detector_name or "").upper().startswith("FAST")
+    checkpoint_exists=bool(checkpoint_path is not None and checkpoint_path.is_file())
     return {
         "platform":platform.platform(),
         "os":platform.system(),
@@ -95,9 +97,9 @@ def collect_environment_metadata(
         "cpu_logical_count":os.cpu_count(),
         "ram_total_bytes":_total_ram_bytes(),
         "git_commit":_git_head(root),
-        "fast_commit":_git_head(fast_root) if fast_root.exists() else None,
-        "checkpoint_name":checkpoint.name,
-        "checkpoint_sha256":_sha256(checkpoint) if checkpoint.exists() else None,
+        "fast_commit":_git_head(fast_root) if is_fast and fast_root.exists() else None,
+        "checkpoint_name":checkpoint_path.name if checkpoint_exists else None,
+        "checkpoint_sha256":_sha256(checkpoint_path) if checkpoint_exists else None,
     }
 
 

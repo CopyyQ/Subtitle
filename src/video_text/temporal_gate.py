@@ -49,14 +49,14 @@ class AdaptiveSubtitleGate:
         self._skipped_since_detect = 0
 
     def _features(self, roi: np.ndarray) -> tuple[np.ndarray, float]:
-        h, w = roi.shape[:2]
+        if roi.ndim == 3:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = np.asarray(roi, dtype=np.uint8)
+        h, w = gray.shape[:2]
         y1 = int(round(h * self.config.band_top_fraction))
         y2 = int(round(h * self.config.band_bottom_fraction))
-        band = roi[max(0, y1):max(y1 + 1, y2)]
-        if band.ndim == 3:
-            band = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
-        else:
-            band = np.asarray(band, dtype=np.uint8)
+        band = gray[max(0, y1):max(y1 + 1, y2)]
         target_w = min(self.config.signature_width, max(1, w))
         target_h = max(1, int(round(band.shape[0] * target_w / max(w, 1))))
         small = cv2.resize(

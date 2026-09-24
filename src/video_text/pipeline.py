@@ -393,7 +393,7 @@ class SubtitlePipeline:
                             ok,frame=cap.read()
                             if not ok:
                                 break
-                            rois.append(frame[y1:y2])
+                            rois.append(frame[y1:y2].copy())
                             decoded+=1
                         if not rois:
                             break
@@ -438,7 +438,7 @@ class SubtitlePipeline:
                         ok,frame=cap.read()
                         if not ok:
                             break
-                        rois.append(frame[y1:y2])
+                        rois.append(frame[y1:y2].copy())
                         processed+=1
                     if not rois:
                         break

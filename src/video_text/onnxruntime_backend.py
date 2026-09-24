@@ -9,8 +9,11 @@ from .openvino_backend import _DefaultPostprocess, prepare_fused_inputs
 
 
 def default_ppocrv5_onnx_model() -> Path | None:
-    path = Path.home() / ".paddlex" / "official_models" / "PP-OCRv5_mobile_det" / "inference.onnx"
-    return path if path.is_file() else None
+    bundled = Path(__file__).resolve().parents[2] / "models" / "PP-OCRv5_mobile_det" / "inference.onnx"
+    if bundled.is_file():
+        return bundled
+    cached = Path.home() / ".paddlex" / "official_models" / "PP-OCRv5_mobile_det" / "inference.onnx"
+    return cached if cached.is_file() else None
 
 
 def _fused_model_path(source: Path) -> Path:

@@ -19,7 +19,7 @@ git switch feature/cpu-final-6412fe7
 ## RTX 3070 GPU stable
 
 - Branch: `feature/rtx3070-gpu`
-- Acceleration commit: `72cbd07`
+- Acceleration commit: `07f4cae`
 - Detector: same PP-OCRv5 Mobile Det model as CPU
 - Runtime: ONNX Runtime TensorRT FP32 with fused uint8 NHWC preprocessing
 - CUDA EP remains the automatic fallback if TensorRT initialization fails
@@ -27,11 +27,12 @@ git switch feature/cpu-final-6412fe7
 
 Full 3733-frame RTX 3070 validation:
 
-- 94.81 FPS end-to-end
-- 234.64 detector FPS
-- detection loop: 18.12 s
-- detector: 15.91 s
-- render/encode: 19.31 s
+- 100.29 FPS end-to-end
+- 230.86 detector FPS
+- detection loop: 18.38 s
+- detector: 16.17 s
+- render/encode: 17.01 s
+- zero-copy raw-frame streaming avoids per-frame `tobytes()` allocations
 - 2581 / 2581 final boxes
 - 0 frame count mismatches vs CPU stable
 - edge p95: 0 px

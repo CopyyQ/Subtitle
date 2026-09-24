@@ -72,6 +72,9 @@ def test_production_cli_defaults_to_detection_only_auto_runtime():
     assert args.ppocr_cpu_engine=="auto"
     assert args.ppocr_openvino_model is None
     assert args.ppocr_openvino_streams==0
+    assert args.ppocr_gpu_engine=="cuda"
+    assert args.ppocr_trt_precision=="fp32"
+    assert args.ppocr_trt_cache_dir is None
     assert args.ppocr_openvino_fuse_preprocess is True
     assert args.ppocr_adaptive_gating is False
     assert args.ppocr_gate_max_skip_frames==2

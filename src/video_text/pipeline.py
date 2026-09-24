@@ -81,6 +81,9 @@ class PipelineConfig:
     ppocr_openvino_model: str | None=None
     ppocr_openvino_streams: int=0
     ppocr_openvino_fuse_preprocess: bool=True
+    ppocr_gpu_engine: str="cuda"
+    ppocr_trt_precision: str="fp32"
+    ppocr_trt_cache_dir: str | None=None
     ppocr_adaptive_gating: bool=False
     ppocr_gate_max_skip_frames: int=2
     ppocr_gate_change_threshold: float=.02
@@ -118,6 +121,10 @@ class PipelineConfig:
             raise ValueError("ppocr_cpu_engine must be auto, openvino, onnxruntime, or paddle")
         if self.ppocr_openvino_streams < 0:
             raise ValueError("ppocr_openvino_streams must be non-negative")
+        if self.ppocr_gpu_engine not in {"cuda","tensorrt"}:
+            raise ValueError("ppocr_gpu_engine must be cuda or tensorrt")
+        if self.ppocr_trt_precision not in {"fp32","fp16"}:
+            raise ValueError("ppocr_trt_precision must be fp32 or fp16")
         if self.ppocr_gate_max_skip_frames < 0:
             raise ValueError("ppocr_gate_max_skip_frames must be non-negative")
         if not 0.0 <= self.ppocr_gate_change_threshold <= 1.0:
@@ -219,6 +226,9 @@ class SubtitlePipeline:
                 openvino_model=self.config.ppocr_openvino_model,
                 openvino_num_streams=self.config.ppocr_openvino_streams,
                 openvino_fuse_preprocess=self.config.ppocr_openvino_fuse_preprocess,
+                gpu_engine=self.config.ppocr_gpu_engine,
+                trt_precision=self.config.ppocr_trt_precision,
+                trt_cache_dir=self.config.ppocr_trt_cache_dir,
                 adaptive_gating=self.config.ppocr_adaptive_gating,
                 gate_max_skip_frames=self.config.ppocr_gate_max_skip_frames,
                 gate_change_threshold=self.config.ppocr_gate_change_threshold,
@@ -255,7 +265,10 @@ class SubtitlePipeline:
             "detector":self.config.detector,
             "detector_model":detector_model,
             "device":self.config.device,
-            "ppocr_gpu_accel_revision":"ort_cuda_fused_v1",
+            "ppocr_gpu_accel_revision":"ort_cuda_trt_fused_v2",
+            "ppocr_gpu_engine":self.config.ppocr_gpu_engine,
+            "ppocr_trt_precision":self.config.ppocr_trt_precision,
+            "ppocr_trt_cache_dir":self.config.ppocr_trt_cache_dir,
             "high_score":self.config.high_score,"low_score":self.config.low_score,
             "ppocr_thresh":self.config.ppocr_thresh,
             "ppocr_box_thresh":self.config.ppocr_box_thresh,
@@ -997,6 +1010,8 @@ class SubtitlePipeline:
         detection_loop_start=time.perf_counter()
         frames,detector_seconds,cache_hit=self._detect(source,info,target,cache_path)
         detection_loop_seconds=time.perf_counter()-detection_loop_start
+        if hasattr(self.backend,"release_accelerator"):
+            self.backend.release_accelerator()
         temporal_start=time.perf_counter()
 
         split_input_count=sum(len(f.high)+len(f.low) for f in frames)
@@ -1289,9 +1304,11 @@ class SubtitlePipeline:
             "ppocr_openvino_optimal_requests":getattr(getattr(self.backend,"predictor",None),"optimal_requests",None),
             "ppocr_openvino_inference_threads":getattr(getattr(self.backend,"predictor",None),"inference_num_threads",None),
             "ppocr_openvino_fuse_preprocess":self.config.ppocr_openvino_fuse_preprocess,
+            "ppocr_gpu_engine_requested":self.config.ppocr_gpu_engine,
+            "ppocr_trt_precision_requested":self.config.ppocr_trt_precision,
             "ppocr_gpu_engine":getattr(self.backend,"gpu_engine",None),
             "ppocr_gpu_acceleration_error":getattr(self.backend,"gpu_acceleration_error",None),
-            "ppocr_gpu_providers":getattr(getattr(self.backend,"predictor",None),"providers",None),
+            "ppocr_gpu_providers":getattr(self.backend,"gpu_providers",None) or getattr(getattr(self.backend,"predictor",None),"providers",None),
             "ppocr_adaptive_gating":self.config.ppocr_adaptive_gating,
             "ppocr_gate_max_skip_frames":self.config.ppocr_gate_max_skip_frames,
             "ppocr_gate_change_threshold":self.config.ppocr_gate_change_threshold,

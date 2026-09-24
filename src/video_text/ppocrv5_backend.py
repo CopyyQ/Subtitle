@@ -54,6 +54,9 @@ class PPOCRv5MobileBackend:
         openvino_model: str | Path | None = None,
         openvino_num_streams: int = 0,
         openvino_fuse_preprocess: bool = False,
+        gpu_engine: str = "cuda",
+        trt_precision: str = "fp32",
+        trt_cache_dir: str | Path | None = None,
         adaptive_gating: bool = False,
         gate_max_skip_frames: int = 2,
         gate_change_threshold: float = .02,
@@ -73,6 +76,9 @@ class PPOCRv5MobileBackend:
         )
         self.openvino_num_streams = int(openvino_num_streams)
         self.openvino_fuse_preprocess = bool(openvino_fuse_preprocess)
+        self.requested_gpu_engine = str(gpu_engine).lower()
+        self.trt_precision = str(trt_precision).lower()
+        self.trt_cache_dir = Path(trt_cache_dir).expanduser() if trt_cache_dir else None
         self.adaptive_gating = bool(adaptive_gating)
         self.gate_max_skip_frames = int(gate_max_skip_frames)
         self.gate_change_threshold = float(gate_change_threshold)
@@ -111,6 +117,10 @@ class PPOCRv5MobileBackend:
             raise ValueError("cpu_threads must be non-negative")
         if self.openvino_num_streams < 0:
             raise ValueError("openvino_num_streams must be non-negative")
+        if self.requested_gpu_engine not in {"cuda","tensorrt"}:
+            raise ValueError("gpu_engine must be cuda or tensorrt")
+        if self.trt_precision not in {"fp32","fp16"}:
+            raise ValueError("trt_precision must be fp32 or fp16")
         if self.gate_max_skip_frames < 0:
             raise ValueError("gate_max_skip_frames must be non-negative")
         if not 0.0 <= self.gate_change_threshold <= 1.0:
@@ -168,12 +178,32 @@ class PPOCRv5MobileBackend:
                         onnx_model,
                         thresh=self.thresh,
                         box_thresh=self.box_thresh,
+                        engine=self.requested_gpu_engine,
+                        precision=self.trt_precision,
+                        max_batch_size=self.batch_size,
+                        trt_cache_dir=self.trt_cache_dir,
                     )
-                    self.gpu_engine = "onnxruntime_cuda"
+                    self.gpu_engine = getattr(predictor, "engine", f"onnxruntime_{self.requested_gpu_engine}")
                     self.precision = getattr(predictor, "precision", "fp32")
                 except Exception as exc:
                     self.gpu_acceleration_error = f"{type(exc).__name__}: {exc}"
                     predictor = None
+                if predictor is None and self.requested_gpu_engine == "tensorrt":
+                    try:
+                        predictor = ONNXRuntimeTextDetectionPredictor(
+                            onnx_model,
+                            thresh=self.thresh,
+                            box_thresh=self.box_thresh,
+                            engine="cuda",
+                            precision="fp32",
+                            max_batch_size=self.batch_size,
+                        )
+                        self.gpu_engine = "onnxruntime_cuda"
+                        self.precision = "fp32"
+                    except Exception as fallback_exc:
+                        detail = f"{type(fallback_exc).__name__}: {fallback_exc}"
+                        self.gpu_acceleration_error = f"{self.gpu_acceleration_error}; CUDA fallback: {detail}"
+                        predictor = None
             if predictor is None:
                 from paddleocr import TextDetection
 
@@ -186,6 +216,12 @@ class PPOCRv5MobileBackend:
                 )
                 self.gpu_engine = "paddle"
         self.predictor = predictor
+        self.gpu_providers = getattr(predictor, "providers", None)
+
+    def release_accelerator(self):
+        release = getattr(self.predictor, "release", None)
+        if callable(release):
+            release()
 
     @staticmethod
     def _clone_predictor_row(row):

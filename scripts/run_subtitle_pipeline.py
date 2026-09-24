@@ -32,6 +32,9 @@ def build_parser():
     p.add_argument("--ppocr-cpu-engine",choices=["auto","openvino","onnxruntime","paddle"],default="auto")
     p.add_argument("--ppocr-openvino-model")
     p.add_argument("--ppocr-openvino-streams",type=int,default=0)
+    p.add_argument("--ppocr-gpu-engine",choices=["cuda","tensorrt"],default="cuda")
+    p.add_argument("--ppocr-trt-precision",choices=["fp32","fp16"],default="fp32")
+    p.add_argument("--ppocr-trt-cache-dir")
     p.add_argument("--ppocr-openvino-fuse-preprocess",dest="ppocr_openvino_fuse_preprocess",action="store_true",default=True)
     p.add_argument("--no-ppocr-openvino-fuse-preprocess",dest="ppocr_openvino_fuse_preprocess",action="store_false")
     p.add_argument("--ppocr-adaptive-gating",action="store_true",default=False)
@@ -87,6 +90,9 @@ def main(argv=None):
         ppocr_cpu_engine=args.ppocr_cpu_engine,
         ppocr_openvino_model=args.ppocr_openvino_model,
         ppocr_openvino_streams=args.ppocr_openvino_streams,
+        ppocr_gpu_engine=args.ppocr_gpu_engine,
+        ppocr_trt_precision=args.ppocr_trt_precision,
+        ppocr_trt_cache_dir=args.ppocr_trt_cache_dir,
         ppocr_openvino_fuse_preprocess=args.ppocr_openvino_fuse_preprocess,
         ppocr_adaptive_gating=args.ppocr_adaptive_gating,
         ppocr_gate_max_skip_frames=args.ppocr_gate_max_skip_frames,

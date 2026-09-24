@@ -32,7 +32,7 @@ ffmpeg -hide_banner -encoders 2>/dev/null | grep h264_nvenc >/dev/null || { echo
 mkdir -p "$OUTDIR" "$TRT_CACHE"
 $PYTHON_BIN scripts/prebuild_gpu_tensorrt.py "$VIDEO" --model "$MODEL" --cache-dir "$TRT_CACHE" --batch-size 64 --precision fp32
 $PYTHON_BIN scripts/run_subtitle_pipeline.py "$VIDEO" \
-  --output "$OUTDIR/out.mp4" --output-encoder nvenc --encode-preset ultrafast \
+  --output "$OUTDIR/out.mp4" --output-encoder nvenc_direct --encode-preset ultrafast \
   --detector ppocrv5_mobile --device cuda --batch-size 64 --decode-prefetch-batches 4 \
   --roi-bottom-fraction .45 --ppocr-gpu-engine tensorrt --ppocr-trt-precision fp32 \
   --ppocr-trt-cache-dir "$TRT_CACHE" --ppocr-adaptive-gating \

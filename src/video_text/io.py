@@ -81,6 +81,110 @@ def build_rawvideo_mux_command(
     return cmd
 
 
+def drawbox_segments(records):
+    groups={}
+    for row in records:
+        key=(
+            int(row.get("track_id",0)),
+            int(row.get("subtitle_id",row.get("track_id",0))),
+            int(row.get("line_id",0)),
+        )
+        groups.setdefault(key,[]).append(row)
+    segments=[]
+    for rows in groups.values():
+        rows=sorted(rows,key=lambda row:int(row["frame"]))
+        start=prev=None
+        box=None
+        for row in rows:
+            fi=int(row["frame"])
+            current=tuple(int(round(float(x))) for x in row["bbox"])
+            if start is None:
+                start=prev=fi
+                box=current
+                continue
+            if fi!=prev+1 or current!=box:
+                segments.append((start,prev,box))
+                start=fi
+                box=current
+            prev=fi
+        if start is not None:
+            segments.append((start,prev,box))
+    return sorted(segments,key=lambda row:(row[0],row[1],row[2]))
+
+
+def build_drawbox_filter(records,thickness=2):
+    filters=[]
+    for start,end,(x1,y1,x2,y2) in drawbox_segments(records):
+        width=max(1,int(x2-x1))
+        height=max(1,int(y2-y1))
+        filters.append(
+            f"drawbox=x={x1}:y={y1}:w={width}:h={height}:"
+            f"color=0x00FF00:t={int(thickness)}:"
+            f"enable='between(n,{start},{end})'"
+        )
+    return ",".join(filters)
+
+
+def build_direct_drawbox_command(
+    source_path,
+    output_path,
+    frame_count,
+    codec="h264",
+    filter_script_path=None,
+):
+    enc=ffmpeg_video_codec(codec,"nvenc")
+    cmd=[
+        _ffmpeg(),"-y","-loglevel","error",
+        "-i",str(source_path),
+        "-map","0:v:0","-map","0:a?",
+    ]
+    if filter_script_path is not None:
+        cmd += ["-filter_script:v",str(filter_script_path)]
+    cmd += ["-c:v",enc]
+    if codec.lower()=="h264":
+        cmd += ["-profile:v","high"]
+    cmd += [
+        "-pix_fmt","yuv420p",
+        "-preset","p1","-rc:v","vbr","-cq:v","18","-b:v","0",
+        "-frames:v",str(int(frame_count)),
+        "-movflags","+faststart",
+        "-c:a","copy",
+        "-shortest",
+        str(output_path),
+    ]
+    return cmd
+
+
+def encode_records_with_audio(
+    records,
+    source_path,
+    output_path,
+    frame_count,
+    codec="h264",
+    thickness=2,
+):
+    output=Path(output_path)
+    output.parent.mkdir(parents=True,exist_ok=True)
+    filter_text=build_drawbox_filter(records,thickness=thickness)
+    with tempfile.TemporaryDirectory(prefix="video_text_drawbox_") as tmpdir:
+        script_path=None
+        if filter_text:
+            script_path=Path(tmpdir)/"filters.txt"
+            script_path.write_text(filter_text,encoding="utf-8")
+        cmd=build_direct_drawbox_command(
+            source_path=source_path,
+            output_path=output,
+            frame_count=frame_count,
+            codec=codec,
+            filter_script_path=script_path,
+        )
+        p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        if p.returncode:
+            message=p.stderr.decode("utf-8","replace")[-2000:] if p.stderr else "ffmpeg failed"
+            raise CodecUnavailableError(message)
+    return output
+
+
 def encode_raw_frames_with_audio(
     frames,
     source_path,

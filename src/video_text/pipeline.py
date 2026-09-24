@@ -36,7 +36,7 @@ from .ppocr_temporal import (
     clamp_ppocr_multiline_seams,
     recover_ppocr_short_lines,
 )
-from .io import encode_raw_frames_with_audio, write_coordinate_json
+from .io import encode_raw_frames_with_audio, encode_records_with_audio, write_coordinate_json
 from .io_probe import bottom_roi, probe_video
 from .lifecycle import reconstruct_tracks, split_tracks_on_geometry, suppress_reconstructed_overlaps
 from .line_grouping import group_candidates_to_lines
@@ -136,8 +136,8 @@ class PipelineConfig:
             raise ValueError("output_codec must be h264 or h265")
         if self.output_preset not in {"ultrafast","superfast","veryfast","faster","fast","medium"}:
             raise ValueError("output_preset must be a supported x264/x265 preset")
-        if self.output_encoder not in {"software","nvenc"}:
-            raise ValueError("output_encoder must be software or nvenc")
+        if self.output_encoder not in {"software","nvenc","nvenc_direct"}:
+            raise ValueError("output_encoder must be software, nvenc, or nvenc_direct")
         if self.max_internal_gap not in {1,2}:
             raise ValueError("max_internal_gap must be 1 or 2")
         if self.smoothing_window<1 or self.smoothing_window%2==0:
@@ -547,6 +547,17 @@ class SubtitlePipeline:
         return sorted(rows,key=lambda r:(r["frame"],r.get("subtitle_id",r["track_id"]),r["line_id"]))
 
     def _render(self,source,output,records,info,target):
+        if self.config.output_encoder=="nvenc_direct":
+            encode_records_with_audio(
+                records,
+                source_path=source,
+                output_path=output,
+                frame_count=target,
+                codec=self.config.output_codec,
+                thickness=self.config.box_thickness,
+            )
+            return
+
         by_frame={}
         for r in records:
             by_frame.setdefault(r["frame"],[]).append(r)
